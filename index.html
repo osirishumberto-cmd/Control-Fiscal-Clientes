@@ -428,8 +428,9 @@ function responsableEspecificoDe(taxpayerId){
   const u = users.find(u => !userHasFullAccess(u) && Array.isArray(u.asignados) && u.asignados.includes(taxpayerId));
   return u ? u.nombre : null;
 }
-const OBLIGACIONES_CATALOGO = ['ISR','IVA','Retenciones (ISR/IVA)','Declaración mensual','Declaración anual','DIOT','Declaraciones informativas','Avisos al RFC','Contabilidad electrónica','IMSS / cuotas obrero-patronales','Impuestos estatales','Otra obligación'];
-const PERIODICIDADES = ['Mensual','Bimestral','Trimestral','Cuatrimestral','Semestral','Anual','Única vez'];
+const OBLIGACIONES_CATALOGO = ['ISR','IVA','Retenciones ISR - Salarios','Retenciones ISR - Asimilados a salarios','Retenciones ISR - Servicios profesionales','Retenciones ISR - Arrendamiento','Retenciones ISR - Otras','Retenciones IVA','Retenciones (ISR/IVA)','Declaración mensual','Declaración anual','DIOT','Declaraciones informativas','Avisos al RFC','Contabilidad electrónica','IMSS / cuotas obrero-patronales','Impuestos estatales','Otra obligación'];
+const PERIODICIDADES = ['Mensual','Bimestral','Trimestral','Cuatrimestral','Semestral','Anual','Única vez','Sin periodo'];
+const MESES_LARGOS = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
 const ETAPAS_OBL = ['Pendiente','En proceso','Esperando información','Determinada','En revisión','Autorizada para presentar','Presentada','Pago pendiente','Pagada','Expediente completo'];
 const ESTATUS_OBL = [...ETAPAS_OBL, 'No aplica'];
 function indiceEtapaObl(estatus){ return ETAPAS_OBL.indexOf(estatus); }
@@ -873,6 +874,7 @@ function loadAll(){
   // Migración: usuarios ya existentes sin registro de conexión/desconexión
   users.forEach(u=>{
     if(u.ultimaConexion === undefined){ u.ultimaConexion = ''; u.ultimaDesconexion = ''; u.sesiones = u.sesiones||[]; migrated = true; }
+    if(u.ultimaActividad === undefined){ u.ultimaActividad = ''; migrated = true; }
   });
   // Auto-reparación: un Administrador SIEMPRE debe tener permiso total en todos los módulos.
   // Esto corrige cualquier caso donde, por edición manual previa o un error ya corregido del
@@ -926,6 +928,7 @@ function migrarContribuyentes(lista){
       if(o.responsable === undefined){ o.responsable = ''; cambio = true; }
       if(o.revisor === undefined){ o.revisor = ''; cambio = true; }
       if(o.montoPagar === undefined){ o.montoPagar = ''; cambio = true; }
+      if(o.horaPresentacion === undefined){ o.horaPresentacion = ''; cambio = true; }
       if(o.lineaCaptura === undefined){ o.lineaCaptura = ''; cambio = true; }
       if(o.acuse === undefined){ o.acuse = null; cambio = true; }
       if(o.periodo === undefined){
@@ -1201,7 +1204,19 @@ function extraerObligacionesCatalogo(texto){
   const detectadas = [];
   const agregar = (tipo)=>{ if(!detectadas.includes(tipo)) detectadas.push(tipo); };
   if(/declaracion de proveedores de iva/.test(t)) agregar('DIOT');
-  if(/retenci/.test(t)) agregar('Retenciones (ISR/IVA)');
+  // Las "retenciones" del SAT no son un solo trámite — son varios distintos (salarios, asimilados,
+  // servicios profesionales, arrendamiento, IVA, etc.), y una misma empresa puede tener que
+  // presentar VARIAS de ellas en el mismo mes. Agruparlas todas bajo una sola categoría genérica
+  // provocaba que, al cargar un segundo acuse con un tipo de retención distinto al primero, el
+  // sistema encontrara "la misma" obligación y la sobrescribiera en vez de reconocer que era una
+  // obligación distinta — por eso se detectan por separado, de la más específica a la más genérica.
+  if(/asimilad.*salari|salari.*asimilad/.test(t)) agregar('Retenciones ISR - Asimilados a salarios');
+  else if(/retenci[^.]*salari/.test(t) || /salari[^.]*retenci/.test(t)) agregar('Retenciones ISR - Salarios');
+  if(/servicios profesionales/.test(t) && /retenci/.test(t)) agregar('Retenciones ISR - Servicios profesionales');
+  if(/arrendamiento/.test(t) && (/retenci/.test(t) || /cuenta de terceros/.test(t))) agregar('Retenciones ISR - Arrendamiento');
+  if(/iva retenc|retenc[^.]*iva\b/.test(t)) agregar('Retenciones IVA');
+  if(/otras retenciones/.test(t)) agregar('Retenciones ISR - Otras');
+  if(/retenci/.test(t) && !detectadas.some(x=>x.startsWith('Retenciones'))) agregar('Retenciones (ISR/IVA)'); // no cayó en ningún tipo específico
   if(/\bisr\b/.test(t)) agregar('ISR');
   if(/\biva\b|impuesto al valor agregado/.test(t)) agregar('IVA');
   if(/contabilidad electr/.test(t)) agregar('Contabilidad electrónica');
@@ -1337,18 +1352,28 @@ function normalizarFechaDDMMYYYY(s){
 }
 function parsearAcuseSAT(texto){
   const limpio = String(texto||'').replace(/\s+/g, ' ');
-  const datos = {tipoDeclaracion:'', fechaPresentacion:'', numeroOperacion:'', montoPagar:'', lineaCaptura:''};
+  const datos = {tipoDeclaracion:'', fechaPresentacion:'', horaPresentacion:'', numeroOperacion:'', montoPagar:'', lineaCaptura:'', ejercicio:'', mesDeclaracion:''};
 
   const mTipo = limpio.match(/Tipo de declaraci[oó]n:?\s*(.+?)\s*(?=Fecha|Per[ií]odo|Periodicidad|Tipo\s+de|Ejercicio|N[uú]mero|RFC|$)/i)
     || limpio.match(/(Declaraci[oó]n (?:provisional|definitiva|anual|informativa)[^\n]{0,40}?)\s*(?=Fecha|Folio|N[uú]mero|L[ií]nea|Importe|Total|RFC|$)/i);
   datos.tipoDeclaracion = mTipo ? mTipo[1].trim() : '';
 
-  const mFecha = limpio.match(/Fecha (?:y hora )?de presentaci[oó]n:?\s*(\d{2}[\/\-]\d{2}[\/\-]\d{4})/i)
-    || limpio.match(/Fecha de env[ií]o:?\s*(\d{2}[\/\-]\d{2}[\/\-]\d{4})/i);
+  // El acuse trae la fecha Y la hora juntas ("21/08/2026 16:36") — se capturan ambas por separado,
+  // ya que la estructura que se pidió mantiene la hora de presentación como su propio dato.
+  const mFecha = limpio.match(/Fecha (?:y hora )?de presentaci[oó]n:?\s*(\d{2}[\/\-]\d{2}[\/\-]\d{4})(?:\s+(\d{1,2}:\d{2}))?/i)
+    || limpio.match(/Fecha de env[ií]o:?\s*(\d{2}[\/\-]\d{2}[\/\-]\d{4})(?:\s+(\d{1,2}:\d{2}))?/i);
   datos.fechaPresentacion = mFecha ? normalizarFechaDDMMYYYY(mFecha[1]) : '';
+  datos.horaPresentacion = (mFecha && mFecha[2]) ? mFecha[2] : '';
 
   const mNumOp = limpio.match(/N[uú]mero de operaci[oó]n:?\s*(\S+)/i) || limpio.match(/Folio(?: de la operaci[oó]n)?:?\s*(\S+)/i);
   datos.numeroOperacion = mNumOp ? mNumOp[1].replace(/[.,;]+$/,'') : '';
+
+  // Ejercicio y periodo de la declaración se capturan como sus propios campos (no combinados),
+  // igual que se ven por separado en el documento del SAT.
+  const mEjercicio = limpio.match(/Ejercicio:?\s*(\d{4})/i);
+  datos.ejercicio = mEjercicio ? mEjercicio[1] : '';
+  const mMesDecl = limpio.match(/Per[ií]odo de la declaraci[oó]n:?\s*([A-Za-zÁÉÍÓÚñÑ]+)/i);
+  datos.mesDeclaracion = mMesDecl ? mMesDecl[1].trim() : '';
 
   // El monto a pagar rara vez viene como un solo "Total a pagar": el acuse de declaración
   // provisional/definitiva del SAT lo desglosa por cada "Concepto de pago" declarado (uno por
@@ -2714,17 +2739,18 @@ function viewUsuarios(){
       <tbody>
       ${users.map(u=>{
         const avanceUsuario = avancePromedioUsuario(u);
+        const enLinea = usuarioEnLinea(u);
         return `
         <tr>
-          <td><div class="avatar" style="display:inline-flex; margin-right:8px; width:24px; height:24px; font-size:10px;">${u.nombre.charAt(0)}</div>${escapeHtml(u.nombre)}</td>
+          <td><div class="avatar" style="display:inline-flex; margin-right:8px; width:24px; height:24px; font-size:10px; position:relative;">${u.nombre.charAt(0)}${enLinea?`<span title="En línea ahora" style="position:absolute; bottom:-1px; right:-1px; width:9px; height:9px; border-radius:50%; background:var(--ok); border:2px solid var(--papel);"></span>`:''}</div>${escapeHtml(u.nombre)}</td>
           <td class="mono">${u.usuario}</td>
           <td>${u.rol}${u.rol==='Consulta' && userHasFullAccess(u)? ` ${pill({tag:'warn', label:'ve todo'})}` : ''}</td>
           <td style="min-width:150px;">
             ${barraAvance(avanceUsuario.promedio)}
             <div class="muted" style="font-size:10.5px; margin-top:2px;">${avanceUsuario.totalContribuyentes} contribuyente${avanceUsuario.totalContribuyentes===1?'':'s'} a cargo${avanceUsuario.conDatos<avanceUsuario.totalContribuyentes && avanceUsuario.totalContribuyentes>0?` · ${avanceUsuario.conDatos} con datos`:''}</div>
           </td>
-          <td class="mono" style="font-size:12px;">${fmtDateTime(u.ultimaConexion)}${u.id===currentUserId?` ${pill({tag:'ok', label:'en línea'})}`:''}</td>
-          <td class="mono" style="font-size:12px;">${u.id===currentUserId? '—' : fmtDateTime(u.ultimaDesconexion)}</td>
+          <td class="mono" style="font-size:12px;">${fmtDateTime(u.ultimaConexion)}${enLinea?` ${pill({tag:'ok', label:'en línea'})}`:''}</td>
+          <td class="mono" style="font-size:12px;">${enLinea? '—' : fmtDateTime(u.ultimaDesconexion)}</td>
           <td>${can('usuarios','editar')?`<button class="link-btn" data-action="editar-usuario" data-id="${u.id}">Editar</button>
             ${users.length>1?`<button class="link-btn" style="color:var(--peligro); margin-left:8px;" data-action="borrar-usuario" data-id="${u.id}">Eliminar</button>`:''}`:''}</td>
         </tr>`;
@@ -3190,9 +3216,31 @@ function mostrarBannerSincronizado(autor){
   toast(`Cambios de ${autor||'otro usuario'} sincronizados automáticamente.`);
 }
 let sharedPollTimer = null;
+let presenciaTimer = null;
+const EN_LINEA_UMBRAL_MIN = 3; // minutos sin pulso de actividad antes de considerar a alguien desconectado
+function usuarioEnLinea(u){
+  return !!(u.ultimaActividad && (Date.now() - new Date(u.ultimaActividad).getTime()) < EN_LINEA_UMBRAL_MIN*60*1000);
+}
+/* Deja constancia de que este usuario sigue con la app abierta ahora mismo — se llama al entrar y
+   luego cada minuto mientras la sesión siga activa. Como los demás ya reciben los cambios de
+   "users" en tiempo real (Firestore), el estado "en línea" se actualiza solo para todo el equipo,
+   sin que nadie tenga que refrescar nada. Es una actualización ligera: no pasa por saveUsers() para
+   no generar una entrada de bitácora cada minuto por cada persona conectada. */
+function actualizarPresencia(){
+  const u = currentUser();
+  if(!u) return;
+  u.ultimaActividad = new Date().toISOString();
+  DB.set(KEYS.users, users);
+  if(fsDB && fsReady){
+    try{ fsDB.collection('users').doc(u.id).update({ultimaActividad: u.ultimaActividad}).catch(()=>{}); }catch(e){}
+  }
+}
 function iniciarRevisionPeriodica(){
   if(sharedPollTimer) clearInterval(sharedPollTimer);
   sharedPollTimer = setInterval(()=>{ if(sharedHandle) checkSharedUpdates(); }, 5000);
+  actualizarPresencia();
+  if(presenciaTimer) clearInterval(presenciaTimer);
+  presenciaTimer = setInterval(actualizarPresencia, 60000);
   // Revisión inmediata al volver a la pestaña/ventana, por si hubo cambios mientras no se veía.
   if(!window._cfpSyncListenersBound){
     window._cfpSyncListenersBound = true;
@@ -3815,7 +3863,13 @@ function formObligacion(tpId, oId){
         </div>
         <div class="field-row">
           <div class="field"><label>Periodicidad</label><select name="periodicidad" id="selPeriodicidadObl">${PERIODICIDADES.map(p=>`<option ${o&&o.periodicidad===p?'selected':''}>${p}</option>`).join('')}</select></div>
-          <div class="field"><label>Periodo que corresponde</label><input type="month" name="periodo" id="periodoObl" value="${o?o.periodo||'':''}">
+        </div>
+        <div class="field-row">
+          <div class="field"><label>Ejercicio</label><input type="number" name="ejercicioObl" id="ejercicioObl" min="2000" max="2100" placeholder="Ej. 2026" value="${o&&o.periodo?o.periodo.slice(0,4):''}"></div>
+          <div class="field"><label>Periodo de la declaración</label><select name="mesObl" id="mesObl">
+            <option value="">— Selecciona el mes —</option>
+            ${MESES_LARGOS.map((m,i)=>`<option value="${i+1}" ${o&&o.periodo&&Number(o.periodo.slice(5,7))===i+1?'selected':''}>${m}</option>`).join('')}
+          </select>
             <div class="field-hint">El mes que se está declarando (ej. agosto), no el mes en que se presenta.</div>
           </div>
         </div>
@@ -3835,7 +3889,7 @@ function formObligacion(tpId, oId){
         </div>
         <fieldset>
           <legend>Declaraciones presentadas</legend>
-          <p class="field-hint" style="margin-bottom:10px;">La primera declaración de un periodo es "Normal". Si después hay que corregirla, agrega una "Complementaria" — cada una guarda su propia fecha, monto, línea de captura y acuse, sin perder la anterior.</p>
+          <p class="field-hint" style="margin-bottom:10px;">La primera declaración de un periodo es "Normal". Si después hay que corregirla, agrega una "Complementaria" — cada una guarda su propia fecha, hora, monto, línea de captura y acuse, sin perder la anterior.</p>
           <div id="declaracionesContainer"></div>
           <button type="button" class="btn btn-sm" id="btnAgregarComplementaria">+ Agregar declaración complementaria</button>
         </fieldset>
@@ -3846,18 +3900,22 @@ function formObligacion(tpId, oId){
   `, true);
   bindModalClose();
 
-  // ---- Periodo -> vencimiento automático (solo para periodicidad Mensual; el usuario puede corregirlo) ----
+  // ---- Ejercicio + Periodo (mes) -> vencimiento automático (solo para periodicidad Mensual) ----
   const selPeriodicidadObl = document.getElementById('selPeriodicidadObl');
-  const periodoObl = document.getElementById('periodoObl');
+  const ejercicioObl = document.getElementById('ejercicioObl');
+  const mesObl = document.getElementById('mesObl');
   const vencimientoObl = document.getElementById('vencimientoObl');
   const hintVencimiento = document.getElementById('hintVencimiento');
+  const periodoCombinado = ()=> (ejercicioObl.value && mesObl.value) ? `${ejercicioObl.value}-${String(mesObl.value).padStart(2,'0')}` : '';
   const actualizarVencimientoAuto = ()=>{
-    hintVencimiento.style.display = selPeriodicidadObl.value==='Mensual' && periodoObl.value ? 'block' : 'none';
-    if(selPeriodicidadObl.value==='Mensual' && periodoObl.value){
-      vencimientoObl.value = calcularVencimientoObligacion(periodoObl.value, t.rfc);
+    const periodo = periodoCombinado();
+    hintVencimiento.style.display = selPeriodicidadObl.value==='Mensual' && periodo ? 'block' : 'none';
+    if(selPeriodicidadObl.value==='Mensual' && periodo){
+      vencimientoObl.value = calcularVencimientoObligacion(periodo, t.rfc);
     }
   };
-  periodoObl.addEventListener('change', actualizarVencimientoAuto);
+  ejercicioObl.addEventListener('change', actualizarVencimientoAuto);
+  mesObl.addEventListener('change', actualizarVencimientoAuto);
   selPeriodicidadObl.addEventListener('change', actualizarVencimientoAuto);
   if(!o) actualizarVencimientoAuto(); // en alta nueva, si ya hay periodo por defecto, se calcula de una vez
 
@@ -3870,7 +3928,7 @@ function formObligacion(tpId, oId){
   // ---- Declaraciones (Normal + Complementarias), cada una con su propio acuse ----
   let declaracionesState = (o && Array.isArray(o.declaraciones) && o.declaraciones.length)
     ? JSON.parse(JSON.stringify(o.declaraciones))
-    : [{tipoDeclaracion:'Normal', fechaPresentacion:(o&&o.fechaPresentacion)||'', fechaPago:(o&&o.fechaPago)||'', numOperacion:(o&&o.numOperacion)||'', montoPagar:(o&&o.montoPagar)||'', lineaCaptura:(o&&o.lineaCaptura)||'', acuse:(o&&o.acuse)||null}];
+    : [{tipoDeclaracion:'Normal', fechaPresentacion:(o&&o.fechaPresentacion)||'', horaPresentacion:(o&&o.horaPresentacion)||'', fechaPago:(o&&o.fechaPago)||'', numOperacion:(o&&o.numOperacion)||'', montoPagar:(o&&o.montoPagar)||'', lineaCaptura:(o&&o.lineaCaptura)||'', acuse:(o&&o.acuse)||null}];
 
   const bloqueDeclaracionHTML = (d, i)=>{
     const esNormal = i===0;
@@ -3882,10 +3940,13 @@ function formObligacion(tpId, oId){
       </div>
       <div class="field-row">
         <div class="field"><label>Fecha de presentación</label><input type="date" data-decl-campo="fechaPresentacion" value="${d.fechaPresentacion||''}"></div>
-        <div class="field"><label>Fecha de pago</label><input type="date" data-decl-campo="fechaPago" value="${d.fechaPago||''}"></div>
+        <div class="field"><label>Hora de presentación</label><input type="time" data-decl-campo="horaPresentacion" value="${d.horaPresentacion||''}"></div>
       </div>
       <div class="field-row">
+        <div class="field"><label>Fecha de pago</label><input type="date" data-decl-campo="fechaPago" value="${d.fechaPago||''}"></div>
         <div class="field"><label>Número de operación</label><input data-decl-campo="numOperacion" value="${escapeAttr(d.numOperacion||'')}"></div>
+      </div>
+      <div class="field-row">
         <div class="field"><label>Monto a pagar</label><input data-decl-campo="montoPagar" placeholder="$" value="${escapeAttr(d.montoPagar||'')}"></div>
       </div>
       <div class="field"><label>Línea de captura</label><input class="mono" data-decl-campo="lineaCaptura" value="${escapeAttr(d.lineaCaptura||'')}"></div>
@@ -3929,6 +3990,7 @@ function formObligacion(tpId, oId){
           }
           const d = res.datos;
           if(d.fechaPresentacion) declaracionesState[idx].fechaPresentacion = d.fechaPresentacion;
+          if(d.horaPresentacion) declaracionesState[idx].horaPresentacion = d.horaPresentacion;
           if(d.numeroOperacion) declaracionesState[idx].numOperacion = d.numeroOperacion;
           if(d.montoPagar) declaracionesState[idx].montoPagar = d.montoPagar;
           if(d.lineaCaptura) declaracionesState[idx].lineaCaptura = d.lineaCaptura;
@@ -3959,12 +4021,12 @@ function formObligacion(tpId, oId){
     }
     const ultimaDecl = declaracionesState[declaracionesState.length-1] || {};
     const payload = {
-      tipo:tipoFinal, periodicidad:f.periodicidad.value, periodo:f.periodo.value||'', vencimiento:f.vencimiento.value, estatus:f.estatus.value,
+      tipo:tipoFinal, periodicidad:f.periodicidad.value, periodo:periodoCombinado(), vencimiento:f.vencimiento.value, estatus:f.estatus.value,
       responsable:f.responsable.value, revisor:f.revisor.value,
       declaraciones: declaracionesState,
       // Los campos de abajo reflejan la declaración más reciente, por compatibilidad con el resto
       // del sistema (semáforo, matriz mensual, reportes) que muestran el estado más actual.
-      fechaPresentacion: ultimaDecl.fechaPresentacion||'', fechaPago: ultimaDecl.fechaPago||'',
+      fechaPresentacion: ultimaDecl.fechaPresentacion||'', horaPresentacion: ultimaDecl.horaPresentacion||'', fechaPago: ultimaDecl.fechaPago||'',
       numOperacion: ultimaDecl.numOperacion||'', montoPagar: ultimaDecl.montoPagar||'', lineaCaptura: ultimaDecl.lineaCaptura||'',
       acuse: ultimaDecl.acuse||null,
       notas:f.notas.value.trim(),
