@@ -3558,6 +3558,14 @@ function viewReportes(){
   ];
   return `
   <div class="view-head"><div><h1>Reportes</h1><p>Genera reportes imprimibles listos para entregar o archivar.</p></div></div>
+  <div class="panel" style="margin-bottom:16px;">
+    <h2 style="margin-top:0; font-size:15px;">Rango de fechas (opcional)</h2>
+    <p class="field-hint" style="margin-bottom:10px;">Filtra los reportes de obligaciones por su fecha de vencimiento. Si dejas los campos vacíos, se incluye toda la información disponible.</p>
+    <div class="field-row">
+      <div class="field"><label>Desde</label><input type="date" id="reporteFechaDesde"></div>
+      <div class="field"><label>Hasta</label><input type="date" id="reporteFechaHasta"></div>
+    </div>
+  </div>
   <div class="grid-cards">
     ${opciones.map(o=>`
       <div class="doc-card" style="gap:10px;">
@@ -3574,40 +3582,92 @@ function viewReportes(){
     </div>
   </div>`;
 }
-
+function leerRangoFechasReporte(){
+  const desde = document.getElementById('reporteFechaDesde');
+  const hasta = document.getElementById('reporteFechaHasta');
+  return {desde: desde&&desde.value?desde.value:null, hasta: hasta&&hasta.value?hasta.value:null};
+}
+function dentroDeRango(fecha, rango){
+  if(!fecha) return true;
+  if(rango.desde && fecha < rango.desde) return false;
+  if(rango.hasta && fecha > rango.hasta) return false;
+  return true;
+}
+/* Resume varias obligaciones del mismo tipo (ej. "ISR" de enero, febrero, marzo...) en un solo
+   renglón por impuesto, con una columna por periodo — en vez de repetir el nombre de la obligación
+   una vez por cada mes. incluirContribuyente=false se usa para el expediente de un solo cliente,
+   donde ya no hace falta repetir su nombre en cada fila. */
+function reporteTablaObligacionesPivot(rows, incluirContribuyente){
+  if(!rows.length) return '<p class="muted">No hay obligaciones que coincidan con este filtro.</p>';
+  const grupos = new Map();
+  const periodosSet = new Set();
+  rows.forEach(o=>{
+    const am = anioMesDeclarado(o);
+    const periodoKey = `${am.anio}-${String(am.mes).padStart(2,'0')}`;
+    periodosSet.add(periodoKey);
+    const grupoKey = (incluirContribuyente?(o.contribuyente||'')+'|||':'') + o.tipo;
+    if(!grupos.has(grupoKey)) grupos.set(grupoKey, {contribuyente:o.contribuyente||'', tipo:o.tipo, porPeriodo:{}});
+    grupos.get(grupoKey).porPeriodo[periodoKey] = o;
+  });
+  const columnas = [...periodosSet].sort().map(p=>{
+    const [anio,mes] = p.split('-');
+    return {key:p, label:`${MESES_CORTOS[Number(mes)-1]} ${anio}`};
+  });
+  const gruposOrdenados = [...grupos.values()].sort((a,b)=>{
+    const c = a.contribuyente.localeCompare(b.contribuyente);
+    return c!==0 ? c : a.tipo.localeCompare(b.tipo);
+  });
+  return `<table style="width:100%; border-collapse:collapse;">
+    <thead><tr>
+      ${incluirContribuyente?'<th style="text-align:left; border-bottom:1px solid #999; padding:6px;">Contribuyente</th>':''}
+      <th style="text-align:left; border-bottom:1px solid #999; padding:6px;">Obligación</th>
+      ${columnas.map(c=>`<th style="text-align:center; border-bottom:1px solid #999; padding:6px;">${c.label}</th>`).join('')}
+    </tr></thead>
+    <tbody>
+      ${gruposOrdenados.map(g=>`<tr>
+        ${incluirContribuyente?`<td style="padding:6px; border-bottom:1px solid #ddd;">${escapeHtml(g.contribuyente)}</td>`:''}
+        <td style="padding:6px; border-bottom:1px solid #ddd;">${escapeHtml(g.tipo)}</td>
+        ${columnas.map(c=>{
+          const o = g.porPeriodo[c.key];
+          if(!o) return `<td style="padding:6px; border-bottom:1px solid #ddd; text-align:center; color:#ccc;">—</td>`;
+          const sem = obligacionSemaforo(o);
+          return `<td style="padding:6px; border-bottom:1px solid #ddd; text-align:center; font-size:11px;">${fmtDate(o.vencimiento)}<br><span style="font-size:9.5px; color:#666;">${escapeHtml(sem.label)}</span></td>`;
+        }).join('')}
+      </tr>`).join('')}
+    </tbody>
+  </table>`;
+}
 function generarReporteGeneral(tipo){
   const titulos = {pendientes:'Obligaciones pendientes', presentadas:'Obligaciones presentadas', vencimientos:'Próximos vencimientos (15 días)', efirmas:'e.firmas próximas a vencer', csd:'CSD próximos a vencer'};
+  const rango = leerRangoFechasReporte();
   let body = '';
   if(tipo==='pendientes' || tipo==='presentadas'){
     const est = tipo==='pendientes'? ETAPAS_OBL.slice(0, indiceEtapaObl('Presentada')) : ETAPAS_OBL.slice(indiceEtapaObl('Presentada'));
-    const rows = allObligacionesFlat().filter(o=> est.includes(o.estatus)).sort((a,b)=>a.vencimiento.localeCompare(b.vencimiento));
-    body = reporteTablaObligaciones(rows);
+    const rows = allObligacionesFlat().filter(o=> est.includes(o.estatus) && dentroDeRango(o.vencimiento, rango)).sort((a,b)=>a.vencimiento.localeCompare(b.vencimiento));
+    body = reporteTablaObligacionesPivot(rows, true);
   } else if(tipo==='vencimientos'){
-    const rows = allObligacionesFlat().filter(o=> obligacionPendienteDePresentar(o) && daysBetween(today(),o.vencimiento)<=15).sort((a,b)=>a.vencimiento.localeCompare(b.vencimiento));
-    body = reporteTablaObligaciones(rows);
+    const rows = allObligacionesFlat().filter(o=> obligacionPendienteDePresentar(o) && daysBetween(today(),o.vencimiento)<=15 && dentroDeRango(o.vencimiento, rango)).sort((a,b)=>a.vencimiento.localeCompare(b.vencimiento));
+    body = reporteTablaObligacionesPivot(rows, true);
   } else if(tipo==='efirmas' || tipo==='csd'){
     const campo = tipo==='efirmas'?'efirma':'csd';
-    const rows = scopedTaxpayers().filter(t=> t[campo] && t[campo].vencimiento && daysBetween(today(), t[campo].vencimiento)<=30);
+    const rows = scopedTaxpayers().filter(t=> t[campo] && t[campo].vencimiento && daysBetween(today(), t[campo].vencimiento)<=30 && dentroDeRango(t[campo].vencimiento, rango));
     body = `<table style="width:100%; border-collapse:collapse;"><thead><tr>${['Contribuyente','RFC','Vencimiento','Días restantes'].map(h=>`<th style="text-align:left; border-bottom:1px solid #999; padding:6px;">${h}</th>`).join('')}</tr></thead><tbody>
       ${rows.map(t=>`<tr><td style="padding:6px; border-bottom:1px solid #ddd;">${t.razonSocial}</td><td style="padding:6px; border-bottom:1px solid #ddd;">${t.rfc}</td><td style="padding:6px; border-bottom:1px solid #ddd;">${fmtDate(t[campo].vencimiento)}</td><td style="padding:6px; border-bottom:1px solid #ddd;">${daysBetween(today(),t[campo].vencimiento)}</td></tr>`).join('')}
     </tbody></table>`;
   }
   imprimirReporte(titulos[tipo], body);
 }
-function reporteTablaObligaciones(rows){
-  return `<table style="width:100%; border-collapse:collapse;"><thead><tr>${['Contribuyente','RFC','Obligación','Periodicidad','Vencimiento','Estatus'].map(h=>`<th style="text-align:left; border-bottom:1px solid #999; padding:6px;">${h}</th>`).join('')}</tr></thead><tbody>
-    ${rows.map(o=>`<tr><td style="padding:6px; border-bottom:1px solid #ddd;">${o.contribuyente}</td><td style="padding:6px; border-bottom:1px solid #ddd;">${o.rfc}</td><td style="padding:6px; border-bottom:1px solid #ddd;">${o.tipo}</td><td style="padding:6px; border-bottom:1px solid #ddd;">${o.periodicidad}</td><td style="padding:6px; border-bottom:1px solid #ddd;">${fmtDate(o.vencimiento)}</td><td style="padding:6px; border-bottom:1px solid #ddd;">${o.estatus}</td></tr>`).join('')}
-  </tbody></table>`;
-}
 function generarReporteContribuyente(id){
   const t = getTaxpayer(id); if(!t) return;
   if(!userCanAccessTaxpayer(currentUser(), t.id)){ toast('No tienes asignado el acceso a este contribuyente.'); return; }
+  const rango = leerRangoFechasReporte();
+  const obligacionesFiltradas = (t.obligaciones||[]).filter(o=> dentroDeRango(o.vencimiento, rango));
   const body = `
     <p><b>RFC:</b> ${t.rfc} &nbsp;&nbsp; <b>Régimen(es):</b> ${regimenesNombres(t)} &nbsp;&nbsp; <b>Estatus:</b> ${t.estatus}</p>
     <p><b>Domicilio:</b> ${t.domicilio||'—'}</p>
     <p><b>Contacto:</b> ${t.contactoNombre||'—'} · ${t.correo||''} · ${t.telefono||''}</p>
     <h3 style="margin-top:18px;">Obligaciones</h3>
-    ${reporteTablaObligaciones((t.obligaciones||[]).map(o=>({...o, contribuyente:t.razonSocial, rfc:t.rfc})))}
+    ${reporteTablaObligacionesPivot(obligacionesFiltradas, false)}
     <h3 style="margin-top:18px;">e.firma y CSD</h3>
     <p>e.firma vence: ${fmtDate((t.efirma||{}).vencimiento)} — CSD vence: ${fmtDate((t.csd||{}).vencimiento)}</p>
     <h3 style="margin-top:18px;">Documentos en expediente</h3>
