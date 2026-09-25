@@ -3767,33 +3767,47 @@ function dentroDeRango(fecha, rango){
    donde ya no hace falta repetir su nombre en cada fila. */
 function reporteTablaObligacionesPivot(rows, incluirContribuyente){
   if(!rows.length) return '<p class="muted">No hay obligaciones que coincidan con este filtro.</p>';
+  if(incluirContribuyente){
+    // El nombre del contribuyente aparece una sola vez, como encabezado de sección — y debajo,
+    // su propia tabla de obligaciones (sin repetir su nombre en cada renglón).
+    const porContribuyente = new Map();
+    rows.forEach(o=>{
+      const nombre = o.contribuyente || '(sin nombre)';
+      if(!porContribuyente.has(nombre)) porContribuyente.set(nombre, []);
+      porContribuyente.get(nombre).push(o);
+    });
+    const nombresOrdenados = [...porContribuyente.keys()].sort((a,b)=>a.localeCompare(b));
+    return nombresOrdenados.map(nombre=>`
+      <h4 style="margin:18px 0 6px; font-family:Georgia,'Times New Roman',serif; color:#0f3d30; font-size:13.5px; border-bottom:1px solid #ccc; padding-bottom:4px;">${escapeHtml(nombre)}</h4>
+      ${tablaObligacionesPorTipo(porContribuyente.get(nombre))}
+    `).join('');
+  }
+  return tablaObligacionesPorTipo(rows);
+}
+/* Un renglón por tipo de obligación (ISR, IVA...), con una columna por periodo — ya sin repetir el
+   nombre del contribuyente, que en los reportes generales se muestra como encabezado aparte. */
+function tablaObligacionesPorTipo(rows){
   const grupos = new Map();
   const periodosSet = new Set();
   rows.forEach(o=>{
     const am = anioMesDeclarado(o);
     const periodoKey = `${am.anio}-${String(am.mes).padStart(2,'0')}`;
     periodosSet.add(periodoKey);
-    const grupoKey = (incluirContribuyente?(o.contribuyente||'')+'|||':'') + o.tipo;
-    if(!grupos.has(grupoKey)) grupos.set(grupoKey, {contribuyente:o.contribuyente||'', tipo:o.tipo, porPeriodo:{}});
-    grupos.get(grupoKey).porPeriodo[periodoKey] = o;
+    if(!grupos.has(o.tipo)) grupos.set(o.tipo, {tipo:o.tipo, porPeriodo:{}});
+    grupos.get(o.tipo).porPeriodo[periodoKey] = o;
   });
   const columnas = [...periodosSet].sort().map(p=>{
     const [anio,mes] = p.split('-');
     return {key:p, label:`${MESES_CORTOS[Number(mes)-1]} ${anio}`};
   });
-  const gruposOrdenados = [...grupos.values()].sort((a,b)=>{
-    const c = a.contribuyente.localeCompare(b.contribuyente);
-    return c!==0 ? c : a.tipo.localeCompare(b.tipo);
-  });
+  const gruposOrdenados = [...grupos.values()].sort((a,b)=>a.tipo.localeCompare(b.tipo));
   return `<table style="width:100%; border-collapse:collapse;">
     <thead><tr>
-      ${incluirContribuyente?'<th style="text-align:left; border-bottom:1px solid #999; padding:6px;">Contribuyente</th>':''}
       <th style="text-align:left; border-bottom:1px solid #999; padding:6px;">Obligación</th>
       ${columnas.map(c=>`<th style="text-align:center; border-bottom:1px solid #999; padding:6px;">${c.label}</th>`).join('')}
     </tr></thead>
     <tbody>
       ${gruposOrdenados.map(g=>`<tr>
-        ${incluirContribuyente?`<td style="padding:6px; border-bottom:1px solid #ddd;">${escapeHtml(g.contribuyente)}</td>`:''}
         <td style="padding:6px; border-bottom:1px solid #ddd;">${escapeHtml(g.tipo)}</td>
         ${columnas.map(c=>{
           const o = g.porPeriodo[c.key];
