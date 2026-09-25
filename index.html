@@ -399,7 +399,7 @@ let fsDB = null;
 let fsReady = false;
 let fsConnecting = false;
 let fsFirstSyncDone = {taxpayers:false, users:false};
-let unsubTaxpayers=null, unsubUsers=null, unsubAudit=null, unsubBranding=null;
+let unsubTaxpayers=null, unsubUsers=null, unsubAudit=null, unsubBranding=null, unsubPlantillas=null;
 let localDocsById = new Map(); // documentos (archivos) por contribuyente — no viaja por Firestore
 let localAcusesById = new Map(); // el PDF (dataUrl) de cada acuse, por id de declaración — tampoco viaja por Firestore
 let migracionPendiente = false;
@@ -476,6 +476,7 @@ const MODULOS = [
   {id:'usuarios', nombre:'Usuarios y permisos'},
   {id:'respaldos', nombre:'Respaldos'},
   {id:'reportes', nombre:'Reportes'},
+  {id:'plantillas', nombre:'Plantillas de correo'},
 ];
 const ICONS = {
   dashboard:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></svg>',
@@ -488,6 +489,7 @@ const ICONS = {
   usuarios:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="8" cy="8" r="3.3"/><path d="M2 20c0-3.6 2.7-5.5 6-5.5s6 1.9 6 5.5"/><circle cx="17" cy="7" r="2.4"/><path d="M22 20c0-3-1.8-4.6-4-5"/></svg>',
   respaldos:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 19h16"/></svg>',
   reportes:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 3h14v18H5z"/><line x1="8" y1="8" x2="16" y2="8"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="8" y1="16" x2="13" y2="16"/></svg>',
+  plantillas:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16v16H4z"/><path d="M4 7l8 6 8-6"/></svg>',
 };
 
 /* ---------------------------- persistencia ------------------------------ */
@@ -495,7 +497,7 @@ const DB = {
   get(key, fallback){ try{ const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; }catch(e){ return fallback; } },
   set(key, val){ localStorage.setItem(key, JSON.stringify(val)); },
 };
-const KEYS = {taxpayers:'cfp_taxpayers', users:'cfp_users', backups:'cfp_backups', config:'cfp_config', session:'cfp_session', audit:'cfp_audit', theme:'cfp_theme', branding:'cfp_branding'};
+const KEYS = {taxpayers:'cfp_taxpayers', users:'cfp_users', backups:'cfp_backups', config:'cfp_config', session:'cfp_session', audit:'cfp_audit', theme:'cfp_theme', branding:'cfp_branding', plantillas:'cfp_plantillas'};
 
 /* ---------------------------- Personalización de colores ---------------------------- */
 function hexToHSL(hex){
@@ -581,6 +583,139 @@ function aplicarBrandingEnSidebar(){
     : `Control Fiscal`;
   const sub = document.getElementById('marcaDespachoSub');
   if(sub) sub.textContent = b.nombreDespacho || 'Despacho de Contadores Públicos';
+}
+/* Plantillas de correo: mensajes reutilizables para pedirle información mensual a los clientes.
+   Se guardan localmente y, con conexión, en la nube (config/plantillas) — todo el equipo ve las
+   mismas. La primera vez que se abre esta sección, se precargan 3 plantillas de ejemplo. */
+function plantillasPorDefecto(){
+  return [
+    {id:'plt-formal', nombre:'Formal / estándar', tipo:'email',
+      asunto:'Solicitud de información — Declaración de [MES] [AÑO]',
+      cuerpo:'Estimado(a) [NOMBRE DEL CLIENTE]:\n\nEsperamos que se encuentre muy bien. Le escribimos para solicitar la información correspondiente al mes de [MES] [AÑO], necesaria para preparar y presentar en tiempo y forma sus obligaciones fiscales ante el SAT.\n\nPara agilizar el proceso, le agradeceremos enviarnos a la brevedad:\n\n• Facturas emitidas (ingresos) del periodo\n• Facturas recibidas (gastos y compras) del periodo\n• Estados de cuenta bancarios del mes\n• Comprobantes de nómina, si aplica\n• Cualquier otro documento relevante del periodo (contratos nuevos, préstamos, etc.)\n\nLe recordamos que, para cumplir con el plazo que marca el SAT, necesitamos contar con esta información a más tardar el [FECHA LÍMITE INTERNA]. Entre más pronto la recibamos, más tiempo tendremos para revisarla con cuidado antes de presentar.\n\nQuedamos atentos a cualquier duda. Gracias de antemano por su apoyo y puntualidad.\n\nSaludos cordiales,\n[TU NOMBRE]\n[NOMBRE DEL DESPACHO]'},
+    {id:'plt-whatsapp', nombre:'Breve / para WhatsApp', tipo:'whatsapp', asunto:'',
+      cuerpo:'Hola [NOMBRE DEL CLIENTE], le saluda [TU NOMBRE] de [NOMBRE DEL DESPACHO].\n\nPara presentar a tiempo sus impuestos de [MES] [AÑO], necesitamos que nos comparta lo antes posible:\n\n✅ Facturas emitidas y recibidas del mes\n✅ Estados de cuenta bancarios\n✅ Nómina (si aplica)\n\nLe pedimos nos la haga llegar a más tardar el [FECHA LÍMITE INTERNA] para poder revisarla con tiempo y evitar contratiempos con el SAT.\n\nQuedamos al pendiente, ¡gracias!'},
+    {id:'plt-urgente', nombre:'Con urgencia (cliente que suele atrasarse)', tipo:'email',
+      asunto:'URGENTE — Información pendiente para su declaración de [MES] [AÑO]',
+      cuerpo:'Estimado(a) [NOMBRE DEL CLIENTE]:\n\nLe reiteramos la solicitud de la información de [MES] [AÑO] para su declaración fiscal, ya que aún no la hemos recibido de su parte.\n\nEl plazo que establece el SAT para esta obligación vence el [FECHA DE VENCIMIENTO SAT]. Para poder cumplir en tiempo, necesitamos contar con su documentación completa (facturas emitidas y recibidas, estados de cuenta, nómina si aplica) a más tardar el [FECHA LÍMITE INTERNA].\n\nDe no recibir la información a tiempo, existe el riesgo de presentar la declaración fuera de plazo, lo cual puede generar recargos y actualizaciones por parte de la autoridad.\n\nQuedamos atentos para resolver cualquier duda y agilizar el proceso.\n\nSaludos cordiales,\n[TU NOMBRE]\n[NOMBRE DEL DESPACHO]'},
+  ];
+}
+function getPlantillas(){
+  const guardadas = DB.get(KEYS.plantillas, null);
+  return (guardadas && guardadas.length) ? guardadas : plantillasPorDefecto();
+}
+function guardarPlantillas(lista){
+  DB.set(KEYS.plantillas, lista);
+  if(fsDB && fsReady){
+    try{ fsDB.collection('config').doc('plantillas').set({lista}, {merge:true}).catch(()=>{}); }catch(e){}
+  }
+}
+function viewPlantillas(){
+  const lista = getPlantillas();
+  const editable = can('plantillas','editar');
+  return `
+  <div class="view-head">
+    <div><h1>Plantillas de correo</h1><p>Mensajes listos para pedir información mensual a tus clientes — úsalos tal cual, o personalízalos para uno en particular.</p></div>
+    ${editable?`<button class="btn btn-sm btn-primary" data-action="nueva-plantilla">+ Nueva plantilla</button>`:''}
+  </div>
+  <div class="notice info">Al usar una plantilla puedes elegir el cliente y el mes — [NOMBRE DEL CLIENTE], [MES], [AÑO], [NOMBRE DEL DESPACHO] y [TU NOMBRE] se rellenan solos. Lo demás (como una fecha límite) se completa a mano.</div>
+  <div class="grid-cards">
+    ${lista.map(p=>`
+      <div class="doc-card" style="gap:8px;">
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px;">
+          <h3 style="margin:0; font-size:14.5px;">${escapeHtml(p.nombre)}</h3>
+          ${pill({tag:'neutro', label:p.tipo==='email'?'Correo':'WhatsApp'})}
+        </div>
+        ${p.asunto?`<p class="muted" style="font-size:12px; margin:0;"><b>Asunto:</b> ${escapeHtml(p.asunto)}</p>`:''}
+        <p style="font-size:12px; white-space:pre-wrap; max-height:110px; overflow:hidden; margin:0; color:var(--tinta-suave);">${escapeHtml(p.cuerpo.slice(0,220))}${p.cuerpo.length>220?'…':''}</p>
+        <div style="display:flex; gap:8px; margin-top:6px; flex-wrap:wrap;">
+          <button class="btn btn-sm btn-primary" data-action="usar-plantilla" data-id="${p.id}">Usar</button>
+          ${editable?`<button class="btn btn-sm" data-action="editar-plantilla" data-id="${p.id}">Editar</button>
+          <button class="btn btn-sm" style="color:var(--peligro);" data-action="eliminar-plantilla" data-id="${p.id}">Eliminar</button>`:''}
+        </div>
+      </div>`).join('')}
+  </div>`;
+}
+function formPlantilla(id){
+  const lista = getPlantillas();
+  const p = id ? lista.find(x=>x.id===id) : null;
+  openModal(`
+    <div class="modal-head"><h2>${p?'Editar plantilla':'Nueva plantilla'}</h2><button class="modal-close" data-close>&times;</button></div>
+    <div class="modal-body">
+      <p class="field-hint" style="margin-bottom:10px;">Puedes usar estos textos entre corchetes — se rellenan solos al usar la plantilla: [NOMBRE DEL CLIENTE], [MES], [AÑO], [NOMBRE DEL DESPACHO], [TU NOMBRE]. Cualquier otro (como una fecha límite) se completa a mano cada vez.</p>
+      <div class="field"><label>Nombre de la plantilla *</label><input required id="plantillaNombre" value="${p?escapeAttr(p.nombre):''}"></div>
+      <div class="field"><label>Tipo</label><select id="plantillaTipo">
+        <option value="email" ${p&&p.tipo==='email'?'selected':''}>Correo electrónico</option>
+        <option value="whatsapp" ${p&&p.tipo==='whatsapp'?'selected':''}>WhatsApp / mensaje breve</option>
+      </select></div>
+      <div class="field" id="campoAsuntoPlantilla"><label>Asunto (solo para correo)</label><input id="plantillaAsunto" value="${p?escapeAttr(p.asunto||''):''}"></div>
+      <div class="field"><label>Cuerpo del mensaje *</label><textarea required id="plantillaCuerpo" rows="10">${p?escapeAttr(p.cuerpo):''}</textarea></div>
+    </div>
+    <div class="modal-foot"><button class="btn" data-close>Cancelar</button><button class="btn btn-primary" id="guardarPlantillaBtn">Guardar</button></div>
+  `, true);
+  bindModalClose();
+  const tipoSel = document.getElementById('plantillaTipo');
+  const campoAsunto = document.getElementById('campoAsuntoPlantilla');
+  const actualizarAsuntoVisible = ()=>{ campoAsunto.style.display = tipoSel.value==='email' ? 'block' : 'none'; };
+  tipoSel.addEventListener('change', actualizarAsuntoVisible);
+  actualizarAsuntoVisible();
+  document.getElementById('guardarPlantillaBtn').addEventListener('click', ()=>{
+    const nombre = document.getElementById('plantillaNombre').value.trim();
+    const cuerpo = document.getElementById('plantillaCuerpo').value.trim();
+    if(!nombre || !cuerpo){ toast('Completa el nombre y el cuerpo del mensaje.'); return; }
+    const datos = {nombre, tipo:tipoSel.value, asunto:document.getElementById('plantillaAsunto').value.trim(), cuerpo};
+    if(p) Object.assign(p, datos);
+    else lista.push({id:uid(), ...datos});
+    guardarPlantillas(lista);
+    closeModal(); render(); toast('Plantilla guardada.');
+  });
+}
+function formUsarPlantilla(id){
+  const p = getPlantillas().find(x=>x.id===id); if(!p) return;
+  const mesActualIdx = (new Date().getMonth()+11)%12; // por defecto sugiere el mes anterior (el que normalmente se declara)
+  openModal(`
+    <div class="modal-head"><h2>Usar: ${escapeHtml(p.nombre)}</h2><button class="modal-close" data-close>&times;</button></div>
+    <div class="modal-body">
+      <div class="field-row">
+        <div class="field"><label>Cliente (opcional)</label><select id="usarPlantillaCliente">
+          <option value="">— Sin especificar —</option>
+          ${scopedTaxpayers().map(t=>`<option value="${t.id}">${escapeHtml(t.razonSocial)}</option>`).join('')}
+        </select></div>
+        <div class="field"><label>Mes a declarar</label><select id="usarPlantillaMes">
+          ${MESES_LARGOS.map((m,i)=>`<option value="${i+1}" ${i===mesActualIdx?'selected':''}>${m}</option>`).join('')}
+        </select></div>
+      </div>
+      ${p.tipo==='email'?`<div class="field"><label>Asunto</label><input id="usarPlantillaAsunto" readonly></div>`:''}
+      <div class="field"><label>Mensaje listo para copiar</label><textarea id="usarPlantillaTexto" rows="12" readonly style="font-family:inherit;"></textarea></div>
+    </div>
+    <div class="modal-foot"><button class="btn" data-close>Cerrar</button><button class="btn btn-primary" id="copiarPlantillaBtn">Copiar al portapapeles</button></div>
+  `, true);
+  bindModalClose();
+  const selCliente = document.getElementById('usarPlantillaCliente');
+  const selMes = document.getElementById('usarPlantillaMes');
+  const actualizar = ()=>{
+    const t = selCliente.value ? getTaxpayer(selCliente.value) : null;
+    const mes = MESES_LARGOS[Number(selMes.value)-1];
+    const anio = String(new Date().getFullYear());
+    const b = getBranding();
+    const reemplazar = (texto)=> String(texto||'')
+      .replace(/\[NOMBRE DEL CLIENTE\]/g, t ? t.razonSocial : '[NOMBRE DEL CLIENTE]')
+      .replace(/\[MES\]/g, mes)
+      .replace(/\[A[ÑN]O\]/gi, anio)
+      .replace(/\[NOMBRE DEL DESPACHO\]/g, b.nombreDespacho || '[NOMBRE DEL DESPACHO]')
+      .replace(/\[TU NOMBRE\]/g, currentUser().nombre);
+    document.getElementById('usarPlantillaTexto').value = reemplazar(p.cuerpo);
+    const asuntoInput = document.getElementById('usarPlantillaAsunto');
+    if(asuntoInput) asuntoInput.value = reemplazar(p.asunto||'');
+  };
+  selCliente.addEventListener('change', actualizar);
+  selMes.addEventListener('change', actualizar);
+  actualizar();
+  document.getElementById('copiarPlantillaBtn').addEventListener('click', ()=>{
+    const texto = document.getElementById('usarPlantillaTexto').value;
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(texto).then(()=> toast('Copiado al portapapeles.')).catch(()=> toast('No se pudo copiar — selecciona el texto y cópialo manualmente.'));
+    } else { toast('Selecciona el texto y cópialo manualmente (Ctrl+C).'); }
+  });
 }
 function formPersonalizarColores(){
   const temaActual = DB.get(KEYS.theme, null);
@@ -948,6 +1083,15 @@ function loadAll(){
   users.forEach(u=>{
     if(u.ultimaConexion === undefined){ u.ultimaConexion = ''; u.ultimaDesconexion = ''; u.sesiones = u.sesiones||[]; migrated = true; }
     if(u.ultimaActividad === undefined){ u.ultimaActividad = ''; migrated = true; }
+    if(u.cumpleanos === undefined){ u.cumpleanos = ''; migrated = true; }
+  });
+  // Migración: si se agrega un módulo nuevo al programa (como acaba de pasar con "Plantillas de
+  // correo"), los usuarios ya existentes no tienen esa llave en su objeto de permisos todavía —
+  // se completa con el valor por defecto de su rol, en vez de quedar sin acceso por accidente.
+  users.forEach(u=>{
+    MODULOS.forEach(m=>{
+      if(!u.permisos[m.id]){ u.permisos[m.id] = defaultPermisos(u.rol)[m.id]; migrated = true; }
+    });
   });
   // Auto-reparación: un Administrador SIEMPRE debe tener permiso total en todos los módulos.
   // Esto corrige cualquier caso donde, por edición manual previa o un error ya corregido del
@@ -1666,7 +1810,13 @@ function aniosComoCliente(fechaAlta, anioObjetivo){
   return anioObjetivo - anioAlta;
 }
 function recopilarAlarmas(){
-  const cumpleanos = [], obligaciones = [], efirmas = [], csds = [], aniversarios = [];
+  const cumpleanos = [], obligaciones = [], efirmas = [], csds = [], aniversarios = [], cumpleanosUsuarios = [];
+  users.forEach(u=>{
+    if(!u.cumpleanos) return;
+    const prox = proximaFechaAnual(u.cumpleanos);
+    if(!prox || prox.dias > UMBRAL_CUMPLE) return;
+    cumpleanosUsuarios.push({u, ...prox});
+  });
   scopedTaxpayers().forEach(t=>{
     (t.contactos||[]).forEach(ct=>{
       if(!ct.cumpleanos) return;
@@ -1699,15 +1849,16 @@ function recopilarAlarmas(){
     }
   });
   cumpleanos.sort((a,b)=>a.dias-b.dias);
+  cumpleanosUsuarios.sort((a,b)=>a.dias-b.dias);
   obligaciones.sort((a,b)=>a.dias-b.dias);
   efirmas.sort((a,b)=>a.dias-b.dias);
   csds.sort((a,b)=>a.dias-b.dias);
   aniversarios.sort((a,b)=>a.dias-b.dias);
-  return {cumpleanos, obligaciones, efirmas, csds, aniversarios};
+  return {cumpleanos, cumpleanosUsuarios, obligaciones, efirmas, csds, aniversarios};
 }
 function contarAlarmas(){
   const a = recopilarAlarmas();
-  return a.cumpleanos.length + a.obligaciones.length + a.efirmas.length + a.csds.length + a.aniversarios.length;
+  return a.cumpleanos.length + a.cumpleanosUsuarios.length + a.obligaciones.length + a.efirmas.length + a.csds.length + a.aniversarios.length;
 }
 function labelDias(d){ if(d===0) return 'Hoy'; if(d===1) return 'Mañana'; if(d<0) return `Vencido hace ${Math.abs(d)}d`; return `En ${d}d`; }
 
@@ -2081,6 +2232,7 @@ function render(){
     usuarios: viewUsuarios,
     respaldos: viewRespaldos,
     reportes: viewReportes,
+    plantillas: viewPlantillas,
   };
   c.innerHTML = (map[STATE.view]||viewDashboard)();
   bindViewEvents();
@@ -2697,8 +2849,8 @@ function viewCalendario(){
 let alarmasExpandidas = new Set(); // ids de contribuyentes con su tarjeta de alarmas abierta
 
 function viewAlarmas(){
-  const {cumpleanos, obligaciones, efirmas, csds, aniversarios} = recopilarAlarmas();
-  const total = cumpleanos.length + obligaciones.length + efirmas.length + csds.length + aniversarios.length;
+  const {cumpleanos, cumpleanosUsuarios, obligaciones, efirmas, csds, aniversarios} = recopilarAlarmas();
+  const total = cumpleanos.length + cumpleanosUsuarios.length + obligaciones.length + efirmas.length + csds.length + aniversarios.length;
 
   // Agrupar todos los pendientes por contribuyente, para que su nombre aparezca una sola vez.
   const porContribuyente = new Map();
@@ -2750,6 +2902,16 @@ function viewAlarmas(){
     <button class="btn btn-sm" data-action="reporte-cumpleanos-anual">📋 Reporte anual de cumpleaños</button>
   </div>
   <div class="notice info">Umbrales: cumpleaños y aniversarios ${UMBRAL_CUMPLE} días antes · obligaciones ${UMBRAL_OBL} días antes · e.firma/CSD ${UMBRAL_FIRMA} días antes. Da clic en un cliente para ver el detalle. Al enviar o marcar como atendido, la alarma no se repite hasta el próximo año.</div>
+  ${cumpleanosUsuarios.length? `
+  <div class="panel" style="margin-bottom:14px;">
+    <h3 style="margin-top:0; font-size:14px;">🎂 Cumpleaños del equipo</h3>
+    <table style="width:100%;"><tbody>
+      ${cumpleanosUsuarios.map(({u, fecha, dias})=>`<tr>
+        <td style="padding:5px 0;">${escapeHtml(u.nombre)}</td>
+        <td style="padding:5px 0; text-align:right;">${dias===0?'<b>¡Hoy!</b>':dias===1?'Mañana':`En ${dias} días`} — ${fmtDate(fecha)}</td>
+      </tr>`).join('')}
+    </tbody></table>
+  </div>`:''}
   ${lista.length? tarjetas : `<div class="panel"><p class="muted">Sin alarmas activas por el momento.</p></div>`}
   `;
 }
@@ -3111,6 +3273,12 @@ function startFirestoreSync(){
     DB.set(KEYS.branding, doc.data());
     aplicarBrandingEnSidebar();
   }, ()=>{ /* silencioso: el logo/nombre local se conserva igual */ });
+
+  unsubPlantillas = fsDB.collection('config').doc('plantillas').onSnapshot(doc=>{
+    if(!doc.exists || !doc.data().lista) return;
+    DB.set(KEYS.plantillas, doc.data().lista);
+    if(STATE.view==='plantillas') render();
+  }, ()=>{ /* silencioso: las plantillas locales se conservan igual */ });
 
   toast('Conectado a la base de datos en la nube. Sincronización en tiempo real activa.');
   renderNav(); renderTopbar();
@@ -3893,6 +4061,17 @@ function bindViewEvents(){
   bindAction(c, 'enviar-aniversario', (el)=>{ const t=getTaxpayer(el.dataset.id); if(t) formEnviarAniversario(t); });
   bindAction(c, 'marcar-aniversario-atendido', (el)=>{ const t=getTaxpayer(el.dataset.id); if(t) marcarAniversarioFelicitado(t); });
   bindAction(c, 'reporte-contribuyente-select', ()=>{ const sel = document.getElementById('reporteContribSelect'); if(sel) generarReporteContribuyente(sel.value); });
+  bindAction(c, 'nueva-plantilla', ()=>{ if(!can('plantillas','editar')){ toast('No tienes permiso.'); return; } formPlantilla(null); });
+  bindAction(c, 'editar-plantilla', (el)=>{ if(!can('plantillas','editar')){ toast('No tienes permiso.'); return; } formPlantilla(el.dataset.id); });
+  bindAction(c, 'usar-plantilla', (el)=> formUsarPlantilla(el.dataset.id));
+  bindAction(c, 'eliminar-plantilla', (el)=>{
+    if(!can('plantillas','editar')){ toast('No tienes permiso.'); return; }
+    confirmarBorrado('¿Eliminar esta plantilla?', ()=>{
+      const lista = getPlantillas().filter(p=>p.id!==el.dataset.id);
+      guardarPlantillas(lista);
+      render(); toast('Plantilla eliminada.');
+    });
+  });
 
   const importFile = document.getElementById('importFile');
   if(importFile) importFile.addEventListener('change', handleImport);
@@ -4675,8 +4854,13 @@ function formUsuario(u){
           <div class="field"><label>Nombre *</label><input required name="nombre" value="${u?escapeAttr(u.nombre):''}"></div>
           <div class="field"><label>Usuario</label><input name="usuario" value="${u?escapeAttr(u.usuario):''}"></div>
         </div>
-        <div class="field"><label>Rol</label>
-          <select name="rol" id="selRolUsuario">${['Administrador','Contador','Auxiliar','Consulta'].map(r=>`<option ${u&&u.rol===r?'selected':''}>${r}</option>`).join('')}</select>
+        <div class="field-row">
+          <div class="field"><label>Rol</label>
+            <select name="rol" id="selRolUsuario">${['Administrador','Contador','Auxiliar','Consulta'].map(r=>`<option ${u&&u.rol===r?'selected':''}>${r}</option>`).join('')}</select>
+          </div>
+          <div class="field"><label>Cumpleaños</label><input type="date" name="cumpleanos" value="${u?(u.cumpleanos||''):''}">
+            <div class="field-hint">Aparece en Alarmas y recordatorios, igual que los de tus clientes.</div>
+          </div>
         </div>
         <fieldset>
           <legend>Permisos por módulo</legend>
@@ -4757,7 +4941,7 @@ function formUsuario(u){
     });
     const asignados = asignarTodosChk.checked ? 'all' : Array.from(f.querySelectorAll('input[name="asigChk"]:checked')).map(i=>i.value);
     if(editing){
-      Object.assign(u, {nombre:f.nombre.value.trim(), usuario:f.usuario.value.trim(), rol:selRolUsuario.value, permisos, asignados, _updatedAt:new Date().toISOString()});
+      Object.assign(u, {nombre:f.nombre.value.trim(), usuario:f.usuario.value.trim(), rol:selRolUsuario.value, cumpleanos:f.cumpleanos.value, permisos, asignados, _updatedAt:new Date().toISOString()});
       if(f.nuevaPass.value) setPassword(u, f.nuevaPass.value);
       saveUsers(`Usuario editado: ${u.nombre} (rol: ${u.rol}, contribuyentes asignados: ${asignados==='all'?'todos':asignados.length}${f.nuevaPass.value?', contraseña restablecida':''}) — por ${currentUser().nombre}`, u);
       // Se autoriza el correo siempre al guardar (no solo si cambió el usuario) — así, si por algún
@@ -4767,7 +4951,7 @@ function formUsuario(u){
       closeModal(); render(); toast('Usuario guardado.');
       return;
     } else {
-      const nuevo = {id:uid(), nombre:f.nombre.value.trim(), usuario:f.usuario.value.trim()||f.nombre.value.trim().toLowerCase().replace(/\s+/g,'.'), rol:selRolUsuario.value, permisos, asignados, _updatedAt:new Date().toISOString()};
+      const nuevo = {id:uid(), nombre:f.nombre.value.trim(), usuario:f.usuario.value.trim()||f.nombre.value.trim().toLowerCase().replace(/\s+/g,'.'), rol:selRolUsuario.value, cumpleanos:f.cumpleanos.value, permisos, asignados, _updatedAt:new Date().toISOString()};
       setPassword(nuevo, f.nuevaPass.value);
       users.push(nuevo);
       saveUsers(`Usuario creado: ${nuevo.nombre} (rol: ${nuevo.rol}, contribuyentes asignados: ${asignados==='all'?'todos':asignados.length}) — por ${currentUser().nombre}`, nuevo);
