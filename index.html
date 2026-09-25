@@ -252,8 +252,24 @@ legend{font-size:12.5px; font-weight:700; color:var(--verde-900); padding:0 6px;
 @media print{
   body *{visibility:hidden;}
   #print-area, #print-area *{visibility:visible;}
-  #print-area{display:block; position:absolute; top:0; left:0; width:100%; padding:20px;}
+  #print-area{display:block; position:absolute; top:0; left:0; width:100%; padding:0;}
   .no-print{display:none !important;}
+  @page{ margin:16mm 14mm 18mm 14mm; }
+  .print-header{ display:flex; align-items:center; justify-content:space-between; gap:14px; border-bottom:2px solid #1c7a56; padding-bottom:12px; margin-bottom:16px; }
+  .print-header .print-logo-box{ width:150px; min-width:150px; }
+  .print-header .print-logo-box.right{ text-align:right; }
+  .print-header img{ max-height:52px; max-width:150px; object-fit:contain; }
+  .print-header-center{ text-align:center; flex:1; }
+  .print-header-center h1{ font-family:Georgia,'Times New Roman',serif; font-size:19px; margin:0 0 3px; color:#0f3d30; }
+  .print-header-center .print-sub{ font-size:11.5px; color:#555; }
+  .print-meta{ font-size:11px; color:#777; margin-bottom:16px; display:flex; justify-content:space-between; border-bottom:1px solid #eee; padding-bottom:8px; }
+  .print-footer{ position:fixed; bottom:0; left:0; right:0; font-size:10px; color:#999; text-align:center; border-top:1px solid #ddd; padding-top:6px; }
+  #print-area table{ width:100%; border-collapse:collapse; font-size:12px; margin-bottom:6px; }
+  #print-area th{ background:#eef4f1; text-align:left; padding:8px 9px; border-bottom:2px solid #9bb; color:#0f3d30; font-size:11.5px; text-transform:uppercase; letter-spacing:.02em; }
+  #print-area td{ padding:7px 9px; border-bottom:1px solid #e6e6e6; }
+  #print-area tr:nth-child(even) td{ background:#fafcfb; }
+  #print-area h3{ font-family:Georgia,'Times New Roman',serif; color:#0f3d30; border-bottom:1px solid #ccc; padding-bottom:5px; margin-top:22px; font-size:14.5px; }
+  #print-area p{ font-size:12.5px; line-height:1.5; }
 }
 
 /* ---------- responsive ---------- */
@@ -291,8 +307,8 @@ legend{font-size:12.5px; font-weight:700; color:var(--verde-900); padding:0 6px;
 
   <aside class="sidebar" id="sidebar">
     <div class="brand">
-      <div class="mark">Control Fiscal</div>
-      <div class="sub">Despacho de Contadores Públicos</div>
+      <div class="mark" id="marcaDespacho">Control Fiscal</div>
+      <div class="sub" id="marcaDespachoSub">Despacho de Contadores Públicos</div>
     </div>
     <nav class="nav" id="nav"></nav>
     <div class="sidebar-foot" id="sidebarFoot">Datos guardados solo en este navegador.</div>
@@ -383,8 +399,9 @@ let fsDB = null;
 let fsReady = false;
 let fsConnecting = false;
 let fsFirstSyncDone = {taxpayers:false, users:false};
-let unsubTaxpayers=null, unsubUsers=null, unsubAudit=null;
+let unsubTaxpayers=null, unsubUsers=null, unsubAudit=null, unsubBranding=null;
 let localDocsById = new Map(); // documentos (archivos) por contribuyente — no viaja por Firestore
+let localAcusesById = new Map(); // el PDF (dataUrl) de cada acuse, por id de declaración — tampoco viaja por Firestore
 let migracionPendiente = false;
 
 /* ---------------------------- catálogos 2026 ---------------------------- */
@@ -478,7 +495,7 @@ const DB = {
   get(key, fallback){ try{ const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; }catch(e){ return fallback; } },
   set(key, val){ localStorage.setItem(key, JSON.stringify(val)); },
 };
-const KEYS = {taxpayers:'cfp_taxpayers', users:'cfp_users', backups:'cfp_backups', config:'cfp_config', session:'cfp_session', audit:'cfp_audit', theme:'cfp_theme'};
+const KEYS = {taxpayers:'cfp_taxpayers', users:'cfp_users', backups:'cfp_backups', config:'cfp_config', session:'cfp_session', audit:'cfp_audit', theme:'cfp_theme', branding:'cfp_branding'};
 
 /* ---------------------------- Personalización de colores ---------------------------- */
 function hexToHSL(hex){
@@ -544,12 +561,48 @@ function restaurarTemaOriginal(){
   DB.set(KEYS.theme, null);
   Object.keys(PALETAS_PRESET[0].vars).forEach(k=> document.documentElement.style.removeProperty(k));
 }
+/* Nombre y logo del despacho: se usan en la barra lateral y al imprimir reportes. Se guardan
+   localmente y, si hay conexión, también en la nube (documento config/despacho) — así todo el
+   equipo ve el mismo logo, sin importar desde qué computadora lo haya subido alguien. */
+function getBranding(){ return DB.get(KEYS.branding, {nombreDespacho:'', logoDataUrl:''}); }
+function guardarBranding(obj){
+  DB.set(KEYS.branding, obj);
+  if(fsDB && fsReady){
+    try{ fsDB.collection('config').doc('despacho').set(obj, {merge:true}).catch(()=>{}); }catch(e){}
+  }
+  aplicarBrandingEnSidebar();
+}
+function aplicarBrandingEnSidebar(){
+  const b = getBranding();
+  const marca = document.getElementById('marcaDespacho');
+  if(!marca) return;
+  marca.innerHTML = b.logoDataUrl
+    ? `<img src="${b.logoDataUrl}" alt="Logo" style="max-height:36px; max-width:100%; object-fit:contain;">`
+    : `Control Fiscal`;
+  const sub = document.getElementById('marcaDespachoSub');
+  if(sub) sub.textContent = b.nombreDespacho || 'Despacho de Contadores Públicos';
+}
 function formPersonalizarColores(){
   const temaActual = DB.get(KEYS.theme, null);
+  const b = getBranding();
   openModal(`
-    <div class="modal-head"><h2>Personalizar colores</h2><button class="modal-close" data-close>&times;</button></div>
+    <div class="modal-head"><h2>Personalizar despacho</h2><button class="modal-close" data-close>&times;</button></div>
     <div class="modal-body">
-      <p class="field-hint" style="margin-bottom:14px;">Elige un color ya combinado, o define el tuyo propio. Se aplica de inmediato y se guarda para la próxima vez que abras la herramienta (solo en este navegador).</p>
+      <fieldset>
+        <legend>Nombre y logo del despacho</legend>
+        <p class="field-hint" style="margin-bottom:10px;">Aparecen en la barra lateral y en los reportes impresos. Se comparten con todo el equipo.</p>
+        <div class="field"><label>Nombre del despacho</label><input id="nombreDespachoInput" value="${escapeAttr(b.nombreDespacho||'')}" placeholder="Ej. Despacho Contable Guadiana"></div>
+        <div class="field">
+          <label>Logo</label>
+          ${b.logoDataUrl?`<div style="margin-bottom:8px;"><img src="${b.logoDataUrl}" style="max-height:60px; max-width:220px; object-fit:contain; border:1px solid var(--borde-fuerte); border-radius:6px; padding:6px; background:#fff;"></div>`:''}
+          <input type="file" id="logoDespachoArchivo" accept="image/*">
+          <div class="field-hint">Se ajusta automáticamente al tamaño correcto — no importa la resolución original.</div>
+        </div>
+        <div style="display:flex; gap:8px;">
+          <button type="button" class="btn btn-sm btn-primary" id="guardarBrandingBtn">Guardar</button>
+          ${b.logoDataUrl?`<button type="button" class="btn btn-sm" style="color:var(--peligro);" id="quitarLogoBtn">Quitar logo</button>`:''}
+        </div>
+      </fieldset>
       <fieldset>
         <legend>Combinaciones listas</legend>
         <div style="display:flex; flex-wrap:wrap; gap:14px;">
@@ -576,6 +629,26 @@ function formPersonalizarColores(){
     <div class="modal-foot"><button class="btn" style="color:var(--peligro);" id="restaurarColores">Restaurar colores originales</button><button class="btn" data-close>Cerrar</button></div>
   `, true);
   bindModalClose();
+  let logoNuevoDataUrl = null;
+  document.getElementById('logoDespachoArchivo').addEventListener('change', async (ev)=>{
+    const file = ev.target.files[0]; if(!file) return;
+    if(!file.type.startsWith('image/')){ toast('Sube una imagen (PNG, JPG, etc.).'); return; }
+    try{ logoNuevoDataUrl = await resizeImageDataUrl(file, 300, 0.85); toast('Logo listo — dale clic a "Guardar" para aplicarlo.'); }
+    catch(e){ toast('No se pudo procesar la imagen.'); }
+  });
+  document.getElementById('guardarBrandingBtn').addEventListener('click', ()=>{
+    const nombreDespacho = document.getElementById('nombreDespachoInput').value.trim();
+    const nuevo = {nombreDespacho, logoDataUrl: logoNuevoDataUrl || b.logoDataUrl || ''};
+    guardarBranding(nuevo);
+    toast('Datos del despacho guardados.');
+    closeModal();
+  });
+  const quitarLogoBtn = document.getElementById('quitarLogoBtn');
+  if(quitarLogoBtn) quitarLogoBtn.addEventListener('click', ()=>{
+    guardarBranding({nombreDespacho: document.getElementById('nombreDespachoInput').value.trim(), logoDataUrl:''});
+    toast('Logo eliminado.');
+    closeModal();
+  });
   document.querySelectorAll('[data-preset]').forEach(btn=>{
     btn.addEventListener('click', ()=>{
       const preset = PALETAS_PRESET.find(p=>p.id===btn.dataset.preset);
@@ -897,6 +970,7 @@ function loadAll(){
 function migrarContribuyentes(lista){
   let cambio = false;
   (lista||[]).forEach(t=>{
+    if(t.logoDataUrl === undefined){ t.logoDataUrl = ''; cambio = true; }
     if(!Array.isArray(t.contactos)){
       t.contactos = [];
       if(t.contactoNombre){
@@ -929,6 +1003,9 @@ function migrarContribuyentes(lista){
       if(o.revisor === undefined){ o.revisor = ''; cambio = true; }
       if(o.montoPagar === undefined){ o.montoPagar = ''; cambio = true; }
       if(o.horaPresentacion === undefined){ o.horaPresentacion = ''; cambio = true; }
+      if(Array.isArray(o.declaraciones)){
+        o.declaraciones.forEach(d=>{ if(!d.id){ d.id = uid(); cambio = true; } });
+      }
       if(o.lineaCaptura === undefined){ o.lineaCaptura = ''; cambio = true; }
       if(o.acuse === undefined){ o.acuse = null; cambio = true; }
       if(o.periodo === undefined){
@@ -941,7 +1018,7 @@ function migrarContribuyentes(lista){
         // Se migra la declaración única anterior a la primera posición del arreglo de declaraciones,
         // marcada como "Normal" — solo si tenía algún dato capturado.
         const teniaAlgo = o.fechaPresentacion || o.numOperacion || o.montoPagar || o.lineaCaptura || o.acuse;
-        o.declaraciones = teniaAlgo ? [{tipoDeclaracion:'Normal', fechaPresentacion:o.fechaPresentacion||'', fechaPago:o.fechaPago||'', numOperacion:o.numOperacion||'', montoPagar:o.montoPagar||'', lineaCaptura:o.lineaCaptura||'', acuse:o.acuse||null}] : [];
+        o.declaraciones = teniaAlgo ? [{id:uid(), tipoDeclaracion:'Normal', fechaPresentacion:o.fechaPresentacion||'', fechaPago:o.fechaPago||'', numOperacion:o.numOperacion||'', montoPagar:o.montoPagar||'', lineaCaptura:o.lineaCaptura||'', acuse:o.acuse||null}] : [];
         cambio = true;
       }
     });
@@ -1399,6 +1476,34 @@ function parsearAcuseSAT(texto){
   datos.lineaCaptura = mLinea ? mLinea[1].replace(/\s+/g,'').toUpperCase() : '';
 
   return datos;
+}
+/* Reduce el tamaño de una imagen antes de guardarla (logos, etc.) — la redibuja en un lienzo a un
+   máximo de ancho/alto y la comprime como JPEG, para que quepa sin problema dentro de un documento
+   de Firestore (que tiene un límite de 1 MB) incluso si el archivo original era muy pesado. */
+function resizeImageDataUrl(file, maxDim, calidad){
+  return new Promise((resolve, reject)=>{
+    const reader = new FileReader();
+    reader.onload = ()=>{
+      const img = new Image();
+      img.onload = ()=>{
+        let {width, height} = img;
+        if(width > maxDim || height > maxDim){
+          if(width > height){ height = Math.round(height * (maxDim/width)); width = maxDim; }
+          else { width = Math.round(width * (maxDim/height)); height = maxDim; }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width; canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#ffffff'; ctx.fillRect(0,0,width,height); // fondo blanco por si el PNG original tenía transparencia
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL('image/jpeg', calidad||0.85));
+      };
+      img.onerror = ()=> reject(new Error('No se pudo leer la imagen.'));
+      img.src = reader.result;
+    };
+    reader.onerror = ()=> reject(new Error('No se pudo leer el archivo.'));
+    reader.readAsDataURL(file);
+  });
 }
 async function extraerDatosAcusePDF(dataUrl){
   if(typeof pdfjsLib === 'undefined') return {error:'no-lib'};
@@ -1960,6 +2065,7 @@ function formChangePassword(u){
 function render(){
   renderNav();
   renderTopbar();
+  aplicarBrandingEnSidebar();
   const c = document.getElementById('content');
   const view = STATE.view;
   if(!MODULOS.some(m=>m.id===view) && view!=='contribuyente-detalle'){ STATE.view='dashboard'; }
@@ -2237,12 +2343,52 @@ function viewContribuyenteDetalle(){
   `;
 }
 
+function formLogoCliente(tpId){
+  const t = getTaxpayer(tpId);
+  openModal(`
+    <div class="modal-head"><h2>Logo de ${escapeHtml(t.razonSocial)}</h2><button class="modal-close" data-close>&times;</button></div>
+    <div class="modal-body">
+      <p class="field-hint" style="margin-bottom:10px;">Aparece en su expediente y en los reportes que se impriman para este contribuyente.</p>
+      ${t.logoDataUrl?`<div style="margin-bottom:10px;"><img src="${t.logoDataUrl}" style="max-height:70px; max-width:220px; object-fit:contain; border:1px solid var(--borde-fuerte); border-radius:6px; padding:6px; background:#fff;"></div>`:''}
+      <div class="field"><input type="file" id="logoClienteArchivo" accept="image/*"></div>
+    </div>
+    <div class="modal-foot">
+      ${t.logoDataUrl?`<button class="btn" style="color:var(--peligro);" id="quitarLogoClienteBtn">Quitar logo</button>`:''}
+      <button class="btn" data-close>Cancelar</button>
+      <button class="btn btn-primary" id="guardarLogoClienteBtn">Guardar</button>
+    </div>
+  `);
+  bindModalClose();
+  let logoNuevoDataUrl = null;
+  document.getElementById('logoClienteArchivo').addEventListener('change', async (ev)=>{
+    const file = ev.target.files[0]; if(!file) return;
+    if(!file.type.startsWith('image/')){ toast('Sube una imagen (PNG, JPG, etc.).'); return; }
+    try{ logoNuevoDataUrl = await resizeImageDataUrl(file, 300, 0.85); toast('Logo listo — dale clic a "Guardar" para aplicarlo.'); }
+    catch(e){ toast('No se pudo procesar la imagen.'); }
+  });
+  document.getElementById('guardarLogoClienteBtn').addEventListener('click', ()=>{
+    if(!logoNuevoDataUrl){ toast('Selecciona una imagen primero.'); return; }
+    t.logoDataUrl = logoNuevoDataUrl;
+    saveTaxpayers(`Logo actualizado para ${t.razonSocial} — por ${currentUser().nombre}`, t);
+    closeModal(); render(); toast('Logo guardado.');
+  });
+  const quitarBtn = document.getElementById('quitarLogoClienteBtn');
+  if(quitarBtn) quitarBtn.addEventListener('click', ()=>{
+    t.logoDataUrl = '';
+    saveTaxpayers(`Logo eliminado de ${t.razonSocial} — por ${currentUser().nombre}`, t);
+    closeModal(); render(); toast('Logo eliminado.');
+  });
+}
 function tabDatos(t){
   const editable = canTaxpayer(t.id,'editar');
   const oc = t.opinionCumplimiento || {estatus:'No verificada', fecha:'', observaciones:''};
   return `<div class="two-col">
     <div class="panel">
-      <h2>Información general</h2>
+      <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:10px;">
+        <h2 style="margin:0;">Información general</h2>
+        ${editable?`<button class="link-btn" data-action="cambiar-logo-cliente" data-id="${t.id}" style="font-size:12px;">${t.logoDataUrl?'Cambiar logo':'+ Agregar logo'}</button>`:''}
+      </div>
+      ${t.logoDataUrl?`<div style="margin:8px 0 12px;"><img src="${t.logoDataUrl}" alt="Logo de ${escapeAttr(t.razonSocial)}" style="max-height:56px; max-width:200px; object-fit:contain; border:1px solid var(--borde-fuerte); border-radius:6px; padding:6px; background:#fff;"></div>`:''}
       <div class="field-row">
         <div><div class="field-hint" style="margin-bottom:2px;">Nombre o razón social</div><div>${escapeHtml(t.razonSocial)}</div></div>
         <div><div class="field-hint" style="margin-bottom:2px;">RFC</div><div class="mono">${t.rfc}</div></div>
@@ -2348,9 +2494,18 @@ const MESES_CORTOS = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct
    por cada mes del año, y un cuadro de color con el estatus de ese mes (o vacío si ese mes
    todavía no tiene ninguna obligación registrada). Pensada para ver un año completo de un
    vistazo, sin desplazarse por la tabla detallada de abajo. */
+// El mes/año que identifica a una obligación mensual para agruparla es el PERIODO que declara
+// (ej. Enero), no el mes en que vence su presentación (que cae en el mes siguiente) — así una
+// obligación de enero aparece en la columna de enero, aunque su vencimiento sea en febrero.
+function anioMesDeclarado(o){
+  if(o.periodo && /^\d{4}-\d{2}$/.test(o.periodo)) return {anio:o.periodo.slice(0,4), mes:Number(o.periodo.slice(5,7))};
+  // Si no se capturó el periodo (datos muy antiguos), se infiere como el mes anterior al vencimiento.
+  const inferido = o.vencimiento ? sumarMeses(o.vencimiento.slice(0,7)+'-01', -1) : null;
+  return inferido ? {anio:inferido.slice(0,4), mes:Number(inferido.slice(5,7))} : {anio:(o.vencimiento||'').slice(0,4), mes:Number((o.vencimiento||'').slice(5,7))};
+}
 function matrizMensualObligaciones(t, anio){
   if(anio==='todos') return '';
-  const mensuales = (t.obligaciones||[]).filter(o=>o.periodicidad==='Mensual' && o.vencimiento.slice(0,4)===anio);
+  const mensuales = (t.obligaciones||[]).filter(o=>o.periodicidad==='Mensual' && anioMesDeclarado(o).anio===anio);
   const tipos = [...new Set(mensuales.map(o=>o.tipo))].sort();
   if(!tipos.length) return '';
   return `
@@ -2360,7 +2515,7 @@ function matrizMensualObligaciones(t, anio){
       <tbody>
         ${tipos.map(tipo=>{
           const porMes = {};
-          mensuales.filter(o=>o.tipo===tipo).forEach(o=> porMes[Number(o.vencimiento.slice(5,7))] = o);
+          mensuales.filter(o=>o.tipo===tipo).forEach(o=> porMes[anioMesDeclarado(o).mes] = o);
           return `<tr>
             <td style="text-align:left;">${escapeHtml(tipo)}</td>
             ${MESES_CORTOS.map((_,i)=>{
@@ -2383,9 +2538,9 @@ function matrizMensualObligaciones(t, anio){
 }
 function tabObligaciones(t){
   const todas = (t.obligaciones||[]).slice().sort((a,b)=>a.vencimiento.localeCompare(b.vencimiento));
-  const anios = [...new Set(todas.map(o=>o.vencimiento.slice(0,4)))].sort((a,b)=>b.localeCompare(a));
+  const anios = [...new Set(todas.map(o=>anioMesDeclarado(o).anio))].sort((a,b)=>b.localeCompare(a));
   const anioSel = anioObligacionesActual(t);
-  const visibles = anioSel==='todos' ? todas : todas.filter(o=> o.vencimiento.slice(0,4)===anioSel || obligacionPendienteDePresentar(o));
+  const visibles = anioSel==='todos' ? todas : todas.filter(o=> anioMesDeclarado(o).anio===anioSel || obligacionPendienteDePresentar(o));
   const ocultas = todas.length - visibles.length;
   return `
   <div class="panel-row">
@@ -2413,7 +2568,7 @@ function tabObligaciones(t){
           <td style="font-size:12px;">${o.responsable?`Prep: ${escapeHtml(o.responsable)}`:'<span class="muted">Sin responsable</span>'}${o.revisor?`<br>Rev: ${escapeHtml(o.revisor)}`:''}</td>
           <td>${o.fechaPresentacion?fmtDate(o.fechaPresentacion):'—'}${o.fechaPago?`<br><span class="muted" style="font-size:11px;">Pago: ${fmtDate(o.fechaPago)}</span>`:''}</td>
           <td class="mono">${o.numOperacion||'—'}</td>
-          <td>${o.acuse?`<a class="link-btn" href="${o.acuse.dataUrl}" download="${escapeHtml(o.acuse.nombre)}">📎 Ver</a>`:'<span class="muted">—</span>'}</td>
+          <td>${o.acuse?(o.acuse.dataUrl?`<a class="link-btn" href="${o.acuse.dataUrl}" download="${escapeHtml(o.acuse.nombre)}">📎 Ver</a>`:`<span class="muted" title="Se subió desde otra computadora">📎 (otro equipo)</span>`):'<span class="muted">—</span>'}</td>
           <td>${canTaxpayer(t.id,'editar')?`
             <button class="link-btn" data-action="editar-obligacion" data-id="${t.id}" data-oid="${o.id}">Editar</button>
             <button class="link-btn" style="color:var(--peligro); margin-left:8px;" data-action="borrar-obligacion" data-id="${t.id}" data-oid="${o.id}">Eliminar</button>`:''}</td>
@@ -2517,12 +2672,12 @@ const GRUPOS_ESTATUS_CAL = {
 function viewCalendario(){
   const f = STATE.params.filtro || {};
   let rows = allObligacionesFlat();
-  const anios = [...new Set(rows.map(o=>o.vencimiento.slice(0,4)))].sort((a,b)=>b.localeCompare(a));
+  const anios = [...new Set(rows.map(o=>anioMesDeclarado(o).anio))].sort((a,b)=>b.localeCompare(a));
   const anioSel = f.anio !== undefined ? f.anio : String(new Date().getFullYear());
   if(f.estatus) rows = rows.filter(o=> (GRUPOS_ESTATUS_CAL[f.estatus]||[]).includes(o.estatus));
   if(f.tp) rows = rows.filter(o=> o.taxpayerId===f.tp);
   const totalAntesAnio = rows.length;
-  if(anioSel !== 'todos') rows = rows.filter(o=> o.vencimiento.slice(0,4)===anioSel || obligacionPendienteDePresentar(o));
+  if(anioSel !== 'todos') rows = rows.filter(o=> anioMesDeclarado(o).anio===anioSel || obligacionPendienteDePresentar(o));
   const ocultasPorAnio = totalAntesAnio - rows.length;
   rows.sort((a,b)=> a.vencimiento.localeCompare(b.vencimiento));
   const chips = [['','Todas'],['por-presentar','Por presentar'],['presentada','Presentadas'],['pago-pendiente','Pago pendiente'],['completadas','Completadas'],['no-aplica','No aplica']];
@@ -2785,7 +2940,54 @@ function viewUsuarios(){
 function auditLog(){ return DB.get(KEYS.audit, []); }
 
 /* ---------------------------- Firestore (tiempo real) ---------------------------- */
-function docSinArchivos(t){ const {documentos, ...resto} = t; return resto; }
+function docSinArchivos(t){
+  const {documentos, ...resto} = t;
+  // Los PDFs de los acuses (el dataUrl en base64) pueden pesar varios cientos de KB cada uno —
+  // sumados entre varias obligaciones y declaraciones de un mismo contribuyente, pueden hacer que
+  // el documento completo exceda el límite de 1 MB por documento que impone Firestore. Por eso el
+  // archivo en sí viaja a la nube solo como referencia (nombre y tipo), y se queda completo
+  // únicamente en el dispositivo donde se subió — igual que ya pasaba con "Documentos".
+  const obligacionesLigeras = (resto.obligaciones||[]).map(o=>{
+    const oLigera = {...o};
+    if(oLigera.acuse && oLigera.acuse.dataUrl) oLigera.acuse = {nombre:oLigera.acuse.nombre, mime:oLigera.acuse.mime};
+    if(Array.isArray(oLigera.declaraciones)){
+      oLigera.declaraciones = oLigera.declaraciones.map(d=>
+        (d.acuse && d.acuse.dataUrl) ? {...d, acuse:{nombre:d.acuse.nombre, mime:d.acuse.mime}} : d
+      );
+    }
+    return oLigera;
+  });
+  return {...resto, obligaciones: obligacionesLigeras};
+}
+/* Antes de reemplazar los datos locales con lo que llega de la nube, se guarda el PDF completo de
+   cada acuse que ya se tuviera (por id de declaración, y por id de obligación para el campo
+   heredado de una sola declaración) — así, aunque el acuse nunca viajó a Firestore, no se pierde
+   en este mismo dispositivo cuando llega la actualización en tiempo real. */
+function guardarAcusesLocales(lista){
+  (lista||[]).forEach(t=>{
+    (t.obligaciones||[]).forEach(o=>{
+      if(o.acuse && o.acuse.dataUrl) localAcusesById.set('obl:'+o.id, o.acuse);
+      (o.declaraciones||[]).forEach(d=>{ if(d.id && d.acuse && d.acuse.dataUrl) localAcusesById.set(d.id, d.acuse); });
+    });
+  });
+}
+function restaurarAcusesLocales(lista){
+  (lista||[]).forEach(t=>{
+    (t.obligaciones||[]).forEach(o=>{
+      if(o.acuse && !o.acuse.dataUrl){
+        const guardado = localAcusesById.get('obl:'+o.id);
+        if(guardado) o.acuse = guardado;
+      }
+      (o.declaraciones||[]).forEach(d=>{
+        if(d.id && d.acuse && !d.acuse.dataUrl){
+          const guardado = localAcusesById.get(d.id);
+          if(guardado) d.acuse = guardado;
+        }
+      });
+    });
+  });
+  return lista;
+}
 // Cada usuario del despacho obtiene una cuenta real de Firebase Authentication, identificada con
 // un correo "sintético" derivado de su nombre de usuario (no necesita ser un correo real que
 // exista, Firebase solo exige el formato). Esto permite que las Reglas de Seguridad de Firestore
@@ -2876,10 +3078,12 @@ function startFirestoreSync(){
     // Los documentos (archivos) no se guardan en Firestore; se conservan a partir de lo
     // que ya se tenía localmente para no perderlos en cada actualización remota.
     taxpayers.forEach(t=>{ if(t.documentos && t.documentos.length) localDocsById.set(t.id, t.documentos); });
+    guardarAcusesLocales(taxpayers);
     taxpayers = snap.docs.map(d=>{
       const data = d.data();
       return {id:d.id, ...data, documentos: localDocsById.get(d.id) || []};
     });
+    restaurarAcusesLocales(taxpayers);
     migrarContribuyentes(taxpayers);
     DB.set(KEYS.taxpayers, taxpayers);
     render();
@@ -2901,6 +3105,12 @@ function startFirestoreSync(){
     renderNav();
     if(STATE.view==='usuarios') render();
   }, ()=>{ /* silencioso: la bitácora local sigue funcionando igual */ });
+
+  unsubBranding = fsDB.collection('config').doc('despacho').onSnapshot(doc=>{
+    if(!doc.exists) return;
+    DB.set(KEYS.branding, doc.data());
+    aplicarBrandingEnSidebar();
+  }, ()=>{ /* silencioso: el logo/nombre local se conserva igual */ });
 
   toast('Conectado a la base de datos en la nube. Sincronización en tiempo real activa.');
   renderNav(); renderTopbar();
@@ -3405,11 +3615,27 @@ function generarReporteContribuyente(id){
     <h3 style="margin-top:18px;">Notas</h3>
     <ul>${(t.notas||[]).map(n=>`<li>${fmtDate(n.fecha)}: ${n.texto}</li>`).join('') || '<li>Sin notas</li>'}</ul>
   `;
-  imprimirReporte(`Expediente — ${t.razonSocial}`, body);
+  imprimirReporte(`Expediente — ${t.razonSocial}`, body, {logoCliente: t.logoDataUrl, subtitulo: `RFC: ${t.rfc}`});
 }
-function imprimirReporte(titulo, bodyHtml){
+function imprimirReporte(titulo, bodyHtml, opciones){
+  opciones = opciones || {};
+  const b = getBranding();
   const area = document.getElementById('print-area');
-  area.innerHTML = `<h1 style="font-family:Georgia,serif;">${titulo}</h1><p style="color:#666; font-size:12px;">Generado el ${fmtDate(today())}</p>${bodyHtml}`;
+  const logoDespachoHTML = b.logoDataUrl ? `<img src="${b.logoDataUrl}" alt="Logo del despacho">` : '';
+  const logoClienteHTML = opciones.logoCliente ? `<img src="${opciones.logoCliente}" alt="Logo del contribuyente">` : '';
+  area.innerHTML = `
+    <div class="print-header">
+      <div class="print-logo-box">${logoDespachoHTML}</div>
+      <div class="print-header-center">
+        <h1>${escapeHtml(titulo)}</h1>
+        <div class="print-sub">${escapeHtml(b.nombreDespacho || 'Despacho de Contadores Públicos')}</div>
+      </div>
+      <div class="print-logo-box right">${logoClienteHTML}</div>
+    </div>
+    <div class="print-meta"><span>Generado el ${fmtDate(today())}</span>${opciones.subtitulo?`<span>${escapeHtml(opciones.subtitulo)}</span>`:''}</div>
+    ${bodyHtml}
+    <div class="print-footer">${escapeHtml(b.nombreDespacho || 'Control Fiscal')} — Documento generado automáticamente</div>
+  `;
   window.print();
 }
 function reporteCumpleanosAnual(){
@@ -3487,6 +3713,7 @@ function bindViewEvents(){
   });
   bindAction(c, 'nueva-obligacion', (el)=>{ if(!canTaxpayer(el.dataset.id,'editar')){ toast('No tienes permiso sobre este contribuyente.'); return; } formObligacion(el.dataset.id); });
   bindAction(c, 'cargar-acuse-global', (el)=>{ if(!canTaxpayer(el.dataset.id,'editar')){ toast('No tienes permiso sobre este contribuyente.'); return; } formAcuseGlobal(el.dataset.id); });
+  bindAction(c, 'cambiar-logo-cliente', (el)=>{ if(!canTaxpayer(el.dataset.id,'editar')){ toast('No tienes permiso sobre este contribuyente.'); return; } formLogoCliente(el.dataset.id); });
   bindAction(c, 'editar-obligacion', (el)=>{ if(!canTaxpayer(el.dataset.id,'editar')){ toast('No tienes permiso sobre este contribuyente.'); return; } formObligacion(el.dataset.id, el.dataset.oid); });
   bindAction(c, 'borrar-obligacion', (el)=>{
     if(!canTaxpayer(el.dataset.id,'editar')){ toast('No tienes permiso sobre este contribuyente.'); return; }
@@ -3928,7 +4155,7 @@ function formObligacion(tpId, oId){
   // ---- Declaraciones (Normal + Complementarias), cada una con su propio acuse ----
   let declaracionesState = (o && Array.isArray(o.declaraciones) && o.declaraciones.length)
     ? JSON.parse(JSON.stringify(o.declaraciones))
-    : [{tipoDeclaracion:'Normal', fechaPresentacion:(o&&o.fechaPresentacion)||'', horaPresentacion:(o&&o.horaPresentacion)||'', fechaPago:(o&&o.fechaPago)||'', numOperacion:(o&&o.numOperacion)||'', montoPagar:(o&&o.montoPagar)||'', lineaCaptura:(o&&o.lineaCaptura)||'', acuse:(o&&o.acuse)||null}];
+    : [{id:uid(), tipoDeclaracion:'Normal', fechaPresentacion:(o&&o.fechaPresentacion)||'', horaPresentacion:(o&&o.horaPresentacion)||'', fechaPago:(o&&o.fechaPago)||'', numOperacion:(o&&o.numOperacion)||'', montoPagar:(o&&o.montoPagar)||'', lineaCaptura:(o&&o.lineaCaptura)||'', acuse:(o&&o.acuse)||null}];
 
   const bloqueDeclaracionHTML = (d, i)=>{
     const esNormal = i===0;
@@ -3952,7 +4179,7 @@ function formObligacion(tpId, oId){
       <div class="field"><label>Línea de captura</label><input class="mono" data-decl-campo="lineaCaptura" value="${escapeAttr(d.lineaCaptura||'')}"></div>
       <div class="field">
         <label>Acuse de presentación (PDF)</label>
-        ${d.acuse?`<div class="notice info" style="margin-bottom:6px; display:flex; align-items:center; justify-content:space-between; gap:8px;"><span>${escapeHtml(d.acuse.nombre)}</span><a class="link-btn" href="${d.acuse.dataUrl}" download="${escapeHtml(d.acuse.nombre)}">Descargar</a></div>`:''}
+        ${d.acuse?`<div class="notice info" style="margin-bottom:6px; display:flex; align-items:center; justify-content:space-between; gap:8px;"><span>${escapeHtml(d.acuse.nombre)}</span>${d.acuse.dataUrl?`<a class="link-btn" href="${d.acuse.dataUrl}" download="${escapeHtml(d.acuse.nombre)}">Descargar</a>`:`<span class="muted" style="font-size:11.5px;">No disponible en este dispositivo — se subió desde otra computadora</span>`}</div>`:''}
         <input type="file" accept=".pdf" data-decl-acuse="${i}">
       </div>
       <div data-decl-leyendo="${i}" style="display:none; margin-top:6px;"><span class="muted" style="font-size:12px;">Leyendo el PDF…</span></div>
@@ -4007,7 +4234,7 @@ function formObligacion(tpId, oId){
   };
   renderDeclaraciones();
   document.getElementById('btnAgregarComplementaria').addEventListener('click', ()=>{
-    declaracionesState.push({tipoDeclaracion:'Complementaria', fechaPresentacion:'', fechaPago:'', numOperacion:'', montoPagar:'', lineaCaptura:'', acuse:null});
+    declaracionesState.push({id:uid(), tipoDeclaracion:'Complementaria', fechaPresentacion:'', fechaPago:'', numOperacion:'', montoPagar:'', lineaCaptura:'', acuse:null});
     renderDeclaraciones();
   });
 
@@ -4111,7 +4338,7 @@ function formAcuseGlobal(tpId){
         const aplicarDeclaracion = (ob, monto)=>{
           if(!Array.isArray(ob.declaraciones)) ob.declaraciones = [];
           const esComplementaria = (res.cabecera.tipoDeclaracion && res.cabecera.tipoDeclaracion.toLowerCase().includes('complement')) || ob.declaraciones.length>0;
-          ob.declaraciones.push({tipoDeclaracion: esComplementaria?'Complementaria':'Normal', fechaPresentacion:res.cabecera.fechaPresentacion||'', fechaPago:'', numOperacion:res.cabecera.numeroOperacion||'', montoPagar:monto, lineaCaptura:res.cabecera.lineaCaptura||'', acuse:archivoAcuseGlobal});
+          ob.declaraciones.push({id:uid(), tipoDeclaracion: esComplementaria?'Complementaria':'Normal', fechaPresentacion:res.cabecera.fechaPresentacion||'', fechaPago:'', numOperacion:res.cabecera.numeroOperacion||'', montoPagar:monto, lineaCaptura:res.cabecera.lineaCaptura||'', acuse:archivoAcuseGlobal});
           const ultima = ob.declaraciones[ob.declaraciones.length-1];
           ob.fechaPresentacion = ultima.fechaPresentacion; ob.fechaPago = ultima.fechaPago; ob.numOperacion = ultima.numOperacion; ob.montoPagar = ultima.montoPagar; ob.lineaCaptura = ultima.lineaCaptura; ob.acuse = ultima.acuse;
           if(ob.estatus !== 'Pagada' && ob.estatus !== 'Expediente completo') ob.estatus = 'Presentada';
