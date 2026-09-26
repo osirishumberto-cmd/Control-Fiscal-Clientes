@@ -1340,6 +1340,18 @@ function logout(){
 function saveTaxpayers(accion, changedTaxpayer){ DB.set(KEYS.taxpayers, taxpayers); touchAudit(accion || 'Actualización de contribuyentes'); maybeAutoBackup(); syncSharedIfLinked(); pushTaxpayersToFirestore(changedTaxpayer); }
 function saveUsers(accion, changedUser){ DB.set(KEYS.users, users); touchAudit(accion || 'Actualización de usuarios/permisos'); syncSharedIfLinked(); pushUsersToFirestore(changedUser); }
 function currentUser(){ return users.find(u=>u.id===currentUserId) || users[0]; }
+/* Función de solo lectura pensada para revisar el estado real del programa desde la consola del
+   navegador (F12) — no cambia ni borra nada. Se necesita como función (en vez de mirar las
+   variables directamente) porque Chrome no deja consultar ciertas variables del programa
+   directamente desde la consola, aunque sí existan y funcionen bien por dentro. */
+function debugEstado(){
+  return {
+    conectadoALaNube: fsReady,
+    usuarioActual: currentUser() ? {nombre:currentUser().nombre, rol:currentUser().rol} : null,
+    usuarios: users.map(u=>({nombre:u.nombre, usuario:u.usuario, rol:u.rol, asignados:u.asignados})),
+    contribuyentes: taxpayers.map(t=>({razonSocial:t.razonSocial, rfc:t.rfc, obligaciones:(t.obligaciones||[]).length})),
+  };
+}
 function can(moduloId, accion){
   const u = currentUser(); if(!u) return false;
   if(u.rol === 'Administrador') return true; // el Administrador siempre tiene acceso total, sin importar lo guardado en "permisos"
@@ -3046,9 +3058,12 @@ function viewUsuarios(){
   return `
   <div class="view-head">
     <div><h1>Usuarios y permisos</h1><p>Perfiles del despacho: Administrador, Contador, Auxiliar y Consulta.</p></div>
-    ${can('usuarios','editar')?`<button class="btn btn-primary" data-action="nuevo-usuario">+ Nuevo usuario</button>`:''}
+    <div style="display:flex; gap:8px;">
+      ${FIREBASE_HABILITADO && fsReady && can('usuarios','editar')? `<button class="btn btn-sm" data-action="sincronizar-accesos">Sincronizar accesos con la nube</button>`:''}
+      ${can('usuarios','editar')?`<button class="btn btn-primary" data-action="nuevo-usuario">+ Nuevo usuario</button>`:''}
+    </div>
   </div>
-  <div class="notice info">Esta herramienta funciona sin servidor: los permisos controlan qué ve/edita cada perfil dentro del navegador, pero no reemplazan una autenticación real de un sistema con backend. El acceso está protegido con usuario y contraseña, y crear/editar usuarios, cambiar permisos o eliminar un usuario requiere confirmar con tu propia contraseña. Cada cambio queda registrado con responsable y fecha en la bitácora de abajo.</div>
+  <div class="notice info">El acceso está protegido con usuario y contraseña real (Firebase Authentication), y qué contribuyentes puede leer o modificar cada quien está restringido también a nivel de la base de datos en la nube — no solo dentro de la aplicación. Crear/editar usuarios, cambiar permisos o eliminar un usuario requiere confirmar con tu propia contraseña. Cada cambio queda registrado con responsable y fecha en la bitácora de abajo.</div>
   ${consultaConAccesoTotal.length? `<div class="notice">⚠️ ${consultaConAccesoTotal.length} usuario(s) de rol "Consulta" tienen actualmente "Acceso a todos los contribuyentes" — esto suele representar a un cliente externo, así que probablemente deberían ver solo su propia información. Revísalo: ${consultaConAccesoTotal.map(u=>escapeHtml(u.nombre)).join(', ')}.</div>` : ''}
   <div class="table-wrap" style="margin-bottom:22px;">
     <table>
@@ -3349,6 +3364,25 @@ function registrarCorreoAutorizado(email){
     ).catch(()=>{ /* si falla, el usuario nuevo simplemente no podrá sincronizar hasta corregirlo a mano */ });
   }catch(e){}
 }
+/* Además de estar autorizado para conectarse, la regla de Firestore revisa AQUÍ qué contribuyentes
+   tiene asignados cada persona, para que alguien con acceso limitado (por ejemplo, un usuario de
+   "Solo consulta") no pueda leer o modificar directamente en la nube los datos de un contribuyente
+   que no le corresponde — ni siquiera saltándose la aplicación. Se actualiza cada vez que se guarda
+   un usuario, y también se puede forzar para todos a la vez desde "Usuarios y permisos". */
+function actualizarAccesoUsuario(u){
+  if(!fsDB || !fsReady) return;
+  try{
+    const email = authEmailDeUsuario(u.usuario);
+    fsDB.collection('config').doc('user_access').set(
+      {list: {[email]: {asignados: u.asignados}}}, {merge:true}
+    ).catch(()=>{});
+  }catch(e){}
+}
+function sincronizarAccesosDeTodos(){
+  if(!fsDB || !fsReady){ toast('Necesitas estar conectado a la nube para hacer esto.'); return; }
+  users.forEach(u=> actualizarAccesoUsuario(u));
+  toast('Accesos de los '+users.length+' usuarios enviados a la nube.');
+}
 function deleteTaxpayerFromFirestore(id){ if(fsDB && fsReady) fsDB.collection('taxpayers').doc(id).delete().catch(()=>{}); }
 function deleteUserFromFirestore(id){ if(fsDB && fsReady) fsDB.collection('users').doc(id).delete().catch(()=>{}); }
 
@@ -3638,7 +3672,7 @@ function maybeAutoBackup(){
 }
 function doBackup(tipo){
   const backups = DB.get(KEYS.backups, []);
-  backups.unshift({id:uid(), fecha:new Date().toISOString(), tipo, data:{taxpayers, users}});
+  backups.unshift({id:uid(), fecha:new Date().toISOString(), tipo, data:{taxpayers, users, branding:getBranding(), plantillas:getPlantillas()}});
   DB.set(KEYS.backups, backups.slice(0,10));
 }
 function viewRespaldos(){
@@ -3986,6 +4020,7 @@ function bindViewEvents(){
     });
   });
   bindAction(c, 'nuevo-usuario', ()=> formUsuario());
+  bindAction(c, 'sincronizar-accesos', ()=> sincronizarAccesosDeTodos());
   bindAction(c, 'editar-usuario', (el)=> formUsuario(users.find(u=>u.id===el.dataset.id)));
   bindAction(c, 'borrar-usuario', (el)=> confirmarBorradoConPassword('¿Eliminar este usuario? Ingresa tu contraseña para confirmar.', ()=>{
     if(el.dataset.id===currentUserId){ toast('No puedes eliminar el usuario con el que iniciaste sesión.'); return; }
@@ -4008,6 +4043,8 @@ function bindViewEvents(){
     const backups = DB.get(KEYS.backups, []); const b = backups.find(x=>x.id===el.dataset.id); if(!b) return;
     taxpayers = b.data.taxpayers; users = b.data.users;
     migrarContribuyentes(taxpayers);
+    if(b.data.branding) guardarBranding(b.data.branding);
+    if(b.data.plantillas) guardarPlantillas(b.data.plantillas);
     saveTaxpayers(`Respaldo restaurado (respaldo ${b.tipo} del ${new Date(b.fecha).toLocaleString('es-MX')}) — por ${currentUser().nombre}`);
     saveUsers(`Respaldo restaurado (respaldo ${b.tipo} del ${new Date(b.fecha).toLocaleString('es-MX')}) — por ${currentUser().nombre}`);
     toast('Respaldo restaurado.'); navigate('dashboard');
@@ -4127,7 +4164,7 @@ function confirmarBorradoConPassword(msg, onYes, botonTexto){
 
 /* ---------------------------- exportar / importar ---------------------------- */
 function exportarJSON(){
-  const data = {exportado: new Date().toISOString(), taxpayers, users};
+  const data = {exportado: new Date().toISOString(), taxpayers, users, branding:getBranding(), plantillas:getPlantillas()};
   const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob); a.download = `control-fiscal-respaldo-${today()}.json`; a.click();
@@ -4143,6 +4180,8 @@ function handleImport(e){
       confirmarBorrado('Se reemplazará la información actual con la del archivo importado — y si hay conexión a la base de datos en la nube, también se sobrescribirá para todo el despacho. ¿Continuar?', ()=>{
         taxpayers = data.taxpayers; if(data.users) users = data.users;
         migrarContribuyentes(taxpayers);
+        if(data.branding) guardarBranding(data.branding);
+        if(data.plantillas) guardarPlantillas(data.plantillas);
         saveTaxpayers(`Información restaurada desde archivo importado (${file.name}) — por ${currentUser().nombre}`);
         saveUsers(`Información restaurada desde archivo importado (${file.name}) — por ${currentUser().nombre}`);
         toast('Información restaurada desde archivo.'); navigate('dashboard');
@@ -4962,6 +5001,7 @@ function formUsuario(u){
       // motivo alguien quedó sin autorizar antes (por ejemplo, se creó sin estar conectado a la
       // nube), basta con volver a guardar su ficha para corregirlo, sin tener que cambiar nada más.
       registrarCorreoAutorizado(authEmailDeUsuario(u.usuario));
+      actualizarAccesoUsuario(u);
       closeModal(); render(); toast('Usuario guardado.');
       return;
     } else {
@@ -4970,6 +5010,7 @@ function formUsuario(u){
       users.push(nuevo);
       saveUsers(`Usuario creado: ${nuevo.nombre} (rol: ${nuevo.rol}, contribuyentes asignados: ${asignados==='all'?'todos':asignados.length}) — por ${currentUser().nombre}`, nuevo);
       registrarCorreoAutorizado(authEmailDeUsuario(nuevo.usuario)); // autoriza de una vez al usuario nuevo para la nube, sin tocar la regla
+      actualizarAccesoUsuario(nuevo);
       closeModal(); render(); toast('Usuario guardado.');
       return;
     }
