@@ -1068,42 +1068,42 @@ function loadAll(){
   taxpayers = DB.get(KEYS.taxpayers, []);
   users = DB.get(KEYS.users, []);
   currentUserId = DB.get(KEYS.session, null);
-  // Migración: usuarios ya existentes (versiones anteriores) sin contraseña reciben una temporal.
+  if(migrarUsuarios(users)) saveUsers();
+  if(migrarContribuyentes(taxpayers)) saveTaxpayers('Migración: contactos y fecha de alta agregados');
+}
+/* Migración de usuarios: agrega campos y permisos que no existían en versiones anteriores del
+   programa. Se llama tanto al arrancar (loadAll) como cada vez que llega una lista de usuarios
+   desde la nube en tiempo real — porque esa lista puede venir de una computadora que todavía tenía
+   una versión más vieja del programa, y sin esto, el programa se rompería al faltarle un campo que
+   el código nuevo ya da por hecho que existe (como pasó con el permiso de "Plantillas de correo"). */
+function migrarUsuarios(lista){
   let migrated = false;
-  users.forEach(u=>{ if(!u.passwordHash){ setPassword(u, '1234'); migrated = true; } });
-  // Migración: usuarios ya existentes sin permiso para el módulo "alarmas" (agregado después)
-  // reciben el mismo permiso que ya tenían en "calendario", como valor por defecto razonable.
-  users.forEach(u=>{
-    if(u.permisos && !u.permisos.alarmas){
+  (lista||[]).forEach(u=>{
+    // Usuarios ya existentes (versiones anteriores) sin contraseña reciben una temporal.
+    if(!u.passwordHash){ setPassword(u, '1234'); migrated = true; }
+    if(!u.permisos) u.permisos = {};
+    // Usuarios ya existentes sin permiso para el módulo "alarmas" (agregado después) reciben el
+    // mismo permiso que ya tenían en "calendario", como valor por defecto razonable.
+    if(!u.permisos.alarmas){
       u.permisos.alarmas = u.permisos.calendario ? {...u.permisos.calendario} : {ver:true, editar:false};
       migrated = true;
     }
-  });
-  // Migración: usuarios ya existentes sin registro de conexión/desconexión
-  users.forEach(u=>{
     if(u.ultimaConexion === undefined){ u.ultimaConexion = ''; u.ultimaDesconexion = ''; u.sesiones = u.sesiones||[]; migrated = true; }
     if(u.ultimaActividad === undefined){ u.ultimaActividad = ''; migrated = true; }
     if(u.cumpleanos === undefined){ u.cumpleanos = ''; migrated = true; }
-  });
-  // Migración: si se agrega un módulo nuevo al programa (como acaba de pasar con "Plantillas de
-  // correo"), los usuarios ya existentes no tienen esa llave en su objeto de permisos todavía —
-  // se completa con el valor por defecto de su rol, en vez de quedar sin acceso por accidente.
-  users.forEach(u=>{
+    // Si se agrega un módulo nuevo al programa (como pasó con "Plantillas de correo"), los usuarios
+    // ya existentes no tienen esa llave en su objeto de permisos todavía — se completa con el valor
+    // por defecto de su rol, en vez de quedar sin acceso, o de romper el programa, por accidente.
     MODULOS.forEach(m=>{
       if(!u.permisos[m.id]){ u.permisos[m.id] = defaultPermisos(u.rol)[m.id]; migrated = true; }
     });
-  });
-  // Auto-reparación: un Administrador SIEMPRE debe tener permiso total en todos los módulos.
-  // Esto corrige cualquier caso donde, por edición manual previa o un error ya corregido del
-  // formulario de usuarios, un Administrador haya quedado guardado con permisos incompletos.
-  users.forEach(u=>{
+    // Auto-reparación: un Administrador SIEMPRE debe tener permiso total en todos los módulos.
     if(u.rol === 'Administrador'){
       const completos = defaultPermisos('Administrador');
       if(JSON.stringify(u.permisos) !== JSON.stringify(completos)){ u.permisos = completos; migrated = true; }
     }
   });
-  if(migrated) saveUsers();
-  if(migrarContribuyentes(taxpayers)) saveTaxpayers('Migración: contactos y fecha de alta agregados');
+  return migrated;
 }
 /* Migración: contribuyentes de versiones anteriores con un solo campo "contactoNombre" pasan a
    la lista de "contactos" (varios contactos por contribuyente); y se agrega "fechaAlta"
@@ -3271,7 +3271,9 @@ function startFirestoreSync(){
     if(!nuevos.length) return; // no pisar la lista local si la nube aún no tiene usuarios
     fsFirstSyncDone.users = true;
     users = nuevos;
+    const migrado = migrarUsuarios(users); // por si la nube trae usuarios de una versión más vieja
     DB.set(KEYS.users, users);
+    if(migrado) saveUsers();
     render();
   }, err=> toast('Error de sincronización (usuarios): '+err.message));
 
