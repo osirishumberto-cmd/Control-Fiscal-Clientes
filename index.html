@@ -495,7 +495,27 @@ const ICONS = {
 /* ---------------------------- persistencia ------------------------------ */
 const DB = {
   get(key, fallback){ try{ const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; }catch(e){ return fallback; } },
-  set(key, val){ localStorage.setItem(key, JSON.stringify(val)); },
+  // Si el navegador se queda sin espacio de almacenamiento, en vez de dejar que el error interrumpa
+  // por completo lo que se estaba haciendo (como pasó al iniciar sesión), se libera espacio borrando
+  // los respaldos guardados —son lo menos crítico, siempre se pueden volver a generar— y se
+  // reintenta guardar una vez. Solo si eso tampoco alcanza, se avisa con claridad sin tronar nada.
+  set(key, val){
+    try{
+      localStorage.setItem(key, JSON.stringify(val));
+    }catch(e){
+      const sinEspacio = e && (e.name==='QuotaExceededError' || e.code===22 || e.code===1014);
+      if(sinEspacio && key !== KEYS.backups){
+        try{
+          localStorage.removeItem(KEYS.backups);
+          localStorage.setItem(key, JSON.stringify(val));
+          if(typeof toast==='function') toast('El almacenamiento del navegador estaba lleno — se liberó espacio borrando respaldos antiguos.');
+          return;
+        }catch(e2){ /* sigue abajo al aviso general */ }
+      }
+      console.warn('No se pudo guardar en el almacenamiento local ('+key+'):', e.message);
+      if(typeof toast==='function') toast('No se pudo guardar localmente: el navegador se quedó sin espacio. Exporta tu información desde "Respaldos" y libera espacio cuando puedas.');
+    }
+  },
 };
 const KEYS = {taxpayers:'cfp_taxpayers', users:'cfp_users', backups:'cfp_backups', config:'cfp_config', session:'cfp_session', audit:'cfp_audit', theme:'cfp_theme', branding:'cfp_branding', plantillas:'cfp_plantillas'};
 
@@ -3674,9 +3694,21 @@ function maybeAutoBackup(){
   DB.set(KEYS.config, cfg);
 }
 function doBackup(tipo){
-  const backups = DB.get(KEYS.backups, []);
-  backups.unshift({id:uid(), fecha:new Date().toISOString(), tipo, data:{taxpayers, users, branding:getBranding(), plantillas:getPlantillas()}});
-  DB.set(KEYS.backups, backups.slice(0,10));
+  // Los respaldos guardan una copia SIN los PDFs de los acuses (igual que ya se hace al enviar a la
+  // nube) — de lo contrario, cada respaldo diario iba acumulando el peso completo de todos los
+  // acuses de todos los contribuyentes, y al guardar hasta 10 respaldos, terminaba superando el
+  // espacio de almacenamiento que el navegador permite (localStorage) — eso era lo que rompía todo
+  // el programa justo al iniciar sesión, sin que apareciera ningún aviso claro del motivo.
+  try{
+    const backups = DB.get(KEYS.backups, []);
+    const taxpayersLigeros = taxpayers.map(t=> docSinArchivos(t));
+    backups.unshift({id:uid(), fecha:new Date().toISOString(), tipo, data:{taxpayers:taxpayersLigeros, users, branding:getBranding(), plantillas:getPlantillas()}});
+    DB.set(KEYS.backups, backups.slice(0,10));
+  }catch(e){
+    // Un respaldo que no se pudo guardar (por ejemplo, por espacio lleno) nunca debe impedir que el
+    // resto del programa siga funcionando con normalidad.
+    console.warn('No se pudo generar el respaldo local:', e.message);
+  }
 }
 function viewRespaldos(){
   const backups = DB.get(KEYS.backups, []);
