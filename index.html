@@ -477,6 +477,7 @@ const MODULOS = [
   {id:'respaldos', nombre:'Respaldos'},
   {id:'reportes', nombre:'Reportes'},
   {id:'plantillas', nombre:'Plantillas de correo'},
+  {id:'configuracion', nombre:'Configuración del sistema'},
 ];
 const ICONS = {
   dashboard:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></svg>',
@@ -490,6 +491,7 @@ const ICONS = {
   respaldos:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 19h16"/></svg>',
   reportes:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 3h14v18H5z"/><line x1="8" y1="8" x2="16" y2="8"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="8" y1="16" x2="13" y2="16"/></svg>',
   plantillas:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16v16H4z"/><path d="M4 7l8 6 8-6"/></svg>',
+  configuracion:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09a1.65 1.65 0 00-1-1.51 1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09a1.65 1.65 0 001.51-1 1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>',
 };
 
 /* ---------------------------- persistencia ------------------------------ */
@@ -517,7 +519,7 @@ const DB = {
     }
   },
 };
-const KEYS = {taxpayers:'cfp_taxpayers', users:'cfp_users', backups:'cfp_backups', config:'cfp_config', session:'cfp_session', audit:'cfp_audit', theme:'cfp_theme', branding:'cfp_branding', plantillas:'cfp_plantillas'};
+const KEYS = {taxpayers:'cfp_taxpayers', users:'cfp_users', backups:'cfp_backups', config:'cfp_config', session:'cfp_session', audit:'cfp_audit', theme:'cfp_theme', branding:'cfp_branding', plantillas:'cfp_plantillas', despachos:'cfp_despachos'};
 
 /* ---------------------------- Personalización de colores ---------------------------- */
 function hexToHSL(hex){
@@ -586,16 +588,73 @@ function restaurarTemaOriginal(){
 /* Nombre y logo del despacho: se usan en la barra lateral y al imprimir reportes. Se guardan
    localmente y, si hay conexión, también en la nube (documento config/despacho) — así todo el
    equipo ve el mismo logo, sin importar desde qué computadora lo haya subido alguien. */
-function getBranding(){ return DB.get(KEYS.branding, {nombreDespacho:'', logoDataUrl:''}); }
-function guardarBranding(obj){
-  DB.set(KEYS.branding, obj);
+function normalizarDespacho(d){
+  d = d || {};
+  return {
+    id: d.id || uid(),
+    nombreDespacho: d.nombreDespacho || '',
+    logoDataUrl: d.logoDataUrl || '',
+    responsables: Array.isArray(d.responsables) ? d.responsables : [],
+    telefono: d.telefono || '',
+    correo: d.correo || '',
+    direccion: d.direccion || '',
+  };
+}
+/* El despacho ya no es uno solo — puede haber 2 o más (por ejemplo, si esta copia del programa se
+   usa para llevar la contabilidad de varias firmas), y cada contribuyente se asigna a uno de ellos.
+   Aquí se guarda la lista completa; getDespachoDe() resuelve cuál corresponde a cada contribuyente. */
+function getDespachos(){
+  const guardados = DB.get(KEYS.despachos, null);
+  if(Array.isArray(guardados)) return guardados.map(normalizarDespacho);
+  // Migración: si esta copia ya tenía un solo despacho configurado (antes de que existiera esta
+  // sección), se convierte en el primero de la lista, sin que se pierda lo que ya se había puesto.
+  const brandingViejo = DB.get(KEYS.branding, null);
+  if(brandingViejo && (brandingViejo.nombreDespacho || brandingViejo.logoDataUrl)){
+    const migrado = [normalizarDespacho(brandingViejo)];
+    DB.set(KEYS.despachos, migrado);
+    return migrado;
+  }
+  return [];
+}
+function guardarDespachos(lista){
+  DB.set(KEYS.despachos, lista);
   if(fsDB && fsReady){
-    try{ fsDB.collection('config').doc('despacho').set(obj, {merge:true}).catch(()=>{}); }catch(e){}
+    try{ fsDB.collection('config').doc('despachos').set({lista}, {merge:true}).catch(()=>{}); }catch(e){}
   }
   aplicarBrandingEnSidebar();
 }
+// El "principal" (el primero de la lista) es el que se usa en la barra lateral y en los reportes
+// que abarcan varios contribuyentes a la vez (que no tienen un solo despacho responsable).
+function getDespachoPrincipal(){
+  const lista = getDespachos();
+  return lista.length ? lista[0] : normalizarDespacho({});
+}
+// El despacho de UN contribuyente específico: el que tenga asignado, o el principal si no se le
+// ha asignado ninguno (por ejemplo, si solo hay uno registrado en todo el sistema).
+function getDespachoDe(taxpayerId){
+  const t = taxpayerId ? getTaxpayer(taxpayerId) : null;
+  const lista = getDespachos();
+  if(t && t.despachoId){
+    const encontrado = lista.find(d=>d.id===t.despachoId);
+    if(encontrado) return encontrado;
+  }
+  return getDespachoPrincipal();
+}
+/* Se conserva por compatibilidad con el resto del código: siempre devuelve el despacho principal. */
+function getBranding(){ return getDespachoPrincipal(); }
+/* Arma el bloque de "firma" con los responsables y datos de contacto de un despacho, para usarse en
+   reportes y con el placeholder [DATOS DE CONTACTO DEL DESPACHO] en las plantillas de correo. */
+function datosContactoTexto(d){
+  d = d || getDespachoPrincipal();
+  const lineas = [];
+  if(d.responsables.length) lineas.push(d.responsables.map(r=> r.cargo? `${r.nombre} (${r.cargo})` : r.nombre).join('\n'));
+  if(d.telefono) lineas.push(`Tel: ${d.telefono}`);
+  if(d.correo) lineas.push(d.correo);
+  if(d.direccion) lineas.push(d.direccion);
+  return lineas.join('\n');
+}
 function aplicarBrandingEnSidebar(){
-  const b = getBranding();
+  const b = getDespachoPrincipal();
   const marca = document.getElementById('marcaDespacho');
   if(!marca) return;
   marca.innerHTML = b.logoDataUrl
@@ -629,6 +688,44 @@ function guardarPlantillas(lista){
     try{ fsDB.collection('config').doc('plantillas').set({lista}, {merge:true}).catch(()=>{}); }catch(e){}
   }
 }
+function viewConfiguracion(){
+  const lista = getDespachos();
+  const editable = can('configuracion','editar');
+  return `
+  <div class="view-head">
+    <div><h1>Configuración del sistema</h1><p>Despachos registrados en este sistema — cada contribuyente se asigna a uno de ellos.</p></div>
+    ${editable?`<button class="btn btn-primary" data-action="nuevo-despacho">+ Agregar despacho</button>`:''}
+  </div>
+  ${!lista.length ? `
+  <div class="panel">
+    <p class="muted">Todavía no has registrado ningún despacho.</p>
+    ${editable?`<button class="btn btn-primary" data-action="nuevo-despacho">Registrar mi primer despacho</button>`:''}
+  </div>` : `
+  <div class="grid-cards">
+    ${lista.map((d,i)=>`
+      <div class="doc-card" style="gap:10px;">
+        <div style="display:flex; align-items:center; gap:12px;">
+          ${d.logoDataUrl?`<img src="${d.logoDataUrl}" style="max-height:48px; max-width:110px; object-fit:contain; border:1px solid var(--borde-fuerte); border-radius:6px; padding:4px; background:#fff;">`:''}
+          <div>
+            <h3 style="margin:0; font-size:15px;">${escapeHtml(d.nombreDespacho)}</h3>
+            ${i===0?'<span class="muted" style="font-size:11px;">Principal — se usa en la barra lateral y en reportes generales</span>':''}
+          </div>
+        </div>
+        ${d.responsables.length?`<p style="font-size:12px; margin:0;">${d.responsables.map(r=> r.cargo?`${escapeHtml(r.nombre)} (${escapeHtml(r.cargo)})`:escapeHtml(r.nombre)).join('<br>')}</p>`:''}
+        ${d.telefono||d.correo||d.direccion?`<p class="muted" style="font-size:11.5px; margin:0;">${[d.telefono,d.correo,d.direccion].filter(Boolean).map(escapeHtml).join(' · ')}</p>`:''}
+        ${editable?`<div style="display:flex; gap:8px; margin-top:4px;">
+          <button class="btn btn-sm" data-action="editar-despacho" data-id="${d.id}">Editar</button>
+          <button class="btn btn-sm" style="color:var(--peligro);" data-action="eliminar-despacho" data-id="${d.id}">Eliminar</button>
+        </div>`:''}
+      </div>`).join('')}
+  </div>`}
+  <div class="panel" style="margin-top:16px;">
+    <h2 style="margin-top:0; font-size:15px;">Apariencia</h2>
+    <p class="muted" style="font-size:12.5px; margin-bottom:10px;">Colores del sistema para todo el equipo (aplica a todos los despachos por igual).</p>
+    ${editable?`<button class="btn btn-sm" data-action="personalizar-colores">🎨 Personalizar colores</button>`:''}
+  </div>
+  `;
+}
 function viewPlantillas(){
   const lista = getPlantillas();
   const editable = can('plantillas','editar');
@@ -637,7 +734,7 @@ function viewPlantillas(){
     <div><h1>Plantillas de correo</h1><p>Mensajes listos para pedir información mensual a tus clientes — úsalos tal cual, o personalízalos para uno en particular.</p></div>
     ${editable?`<button class="btn btn-sm btn-primary" data-action="nueva-plantilla">+ Nueva plantilla</button>`:''}
   </div>
-  <div class="notice info">Al usar una plantilla puedes elegir el cliente y el mes — [NOMBRE DEL CLIENTE], [MES], [AÑO], [NOMBRE DEL DESPACHO] y [TU NOMBRE] se rellenan solos. Lo demás (como una fecha límite) se completa a mano.</div>
+  <div class="notice info">Al usar una plantilla puedes elegir el cliente y el mes — [NOMBRE DEL CLIENTE], [MES], [AÑO], [NOMBRE DEL DESPACHO], [TU NOMBRE] y [DATOS DE CONTACTO DEL DESPACHO] se rellenan solos. Lo demás (como una fecha límite) se completa a mano.</div>
   <div class="grid-cards">
     ${lista.map(p=>`
       <div class="doc-card" style="gap:8px;">
@@ -661,7 +758,7 @@ function formPlantilla(id){
   openModal(`
     <div class="modal-head"><h2>${p?'Editar plantilla':'Nueva plantilla'}</h2><button class="modal-close" data-close>&times;</button></div>
     <div class="modal-body">
-      <p class="field-hint" style="margin-bottom:10px;">Puedes usar estos textos entre corchetes — se rellenan solos al usar la plantilla: [NOMBRE DEL CLIENTE], [MES], [AÑO], [NOMBRE DEL DESPACHO], [TU NOMBRE]. Cualquier otro (como una fecha límite) se completa a mano cada vez.</p>
+      <p class="field-hint" style="margin-bottom:10px;">Puedes usar estos textos entre corchetes — se rellenan solos al usar la plantilla: [NOMBRE DEL CLIENTE], [MES], [AÑO], [NOMBRE DEL DESPACHO], [TU NOMBRE], [DATOS DE CONTACTO DEL DESPACHO]. Cualquier otro (como una fecha límite) se completa a mano cada vez.</p>
       <div class="field"><label>Nombre de la plantilla *</label><input required id="plantillaNombre" value="${p?escapeAttr(p.nombre):''}"></div>
       <div class="field"><label>Tipo</label><select id="plantillaTipo">
         <option value="email" ${p&&p.tipo==='email'?'selected':''}>Correo electrónico</option>
@@ -716,13 +813,14 @@ function formUsarPlantilla(id){
     const t = selCliente.value ? getTaxpayer(selCliente.value) : null;
     const mes = MESES_LARGOS[Number(selMes.value)-1];
     const anio = String(new Date().getFullYear());
-    const b = getBranding();
+    const b = t ? getDespachoDe(t.id) : getDespachoPrincipal();
     const reemplazar = (texto)=> String(texto||'')
       .replace(/\[NOMBRE DEL CLIENTE\]/g, t ? t.razonSocial : '[NOMBRE DEL CLIENTE]')
       .replace(/\[MES\]/g, mes)
       .replace(/\[A[ÑN]O\]/gi, anio)
       .replace(/\[NOMBRE DEL DESPACHO\]/g, b.nombreDespacho || '[NOMBRE DEL DESPACHO]')
-      .replace(/\[TU NOMBRE\]/g, currentUser().nombre);
+      .replace(/\[TU NOMBRE\]/g, currentUser().nombre)
+      .replace(/\[DATOS DE CONTACTO DEL DESPACHO\]/g, datosContactoTexto(b));
     document.getElementById('usarPlantillaTexto').value = reemplazar(p.cuerpo);
     const asuntoInput = document.getElementById('usarPlantillaAsunto');
     if(asuntoInput) asuntoInput.value = reemplazar(p.asunto||'');
@@ -739,25 +837,10 @@ function formUsarPlantilla(id){
 }
 function formPersonalizarColores(){
   const temaActual = DB.get(KEYS.theme, null);
-  const b = getBranding();
   openModal(`
-    <div class="modal-head"><h2>Personalizar despacho</h2><button class="modal-close" data-close>&times;</button></div>
+    <div class="modal-head"><h2>Personalizar colores</h2><button class="modal-close" data-close>&times;</button></div>
     <div class="modal-body">
-      <fieldset>
-        <legend>Nombre y logo del despacho</legend>
-        <p class="field-hint" style="margin-bottom:10px;">Aparecen en la barra lateral y en los reportes impresos. Se comparten con todo el equipo.</p>
-        <div class="field"><label>Nombre del despacho</label><input id="nombreDespachoInput" value="${escapeAttr(b.nombreDespacho||'')}" placeholder="Ej. Despacho Contable Guadiana"></div>
-        <div class="field">
-          <label>Logo</label>
-          ${b.logoDataUrl?`<div style="margin-bottom:8px;"><img src="${b.logoDataUrl}" style="max-height:60px; max-width:220px; object-fit:contain; border:1px solid var(--borde-fuerte); border-radius:6px; padding:6px; background:#fff;"></div>`:''}
-          <input type="file" id="logoDespachoArchivo" accept="image/*">
-          <div class="field-hint">Se ajusta automáticamente al tamaño correcto — no importa la resolución original.</div>
-        </div>
-        <div style="display:flex; gap:8px;">
-          <button type="button" class="btn btn-sm btn-primary" id="guardarBrandingBtn">Guardar</button>
-          ${b.logoDataUrl?`<button type="button" class="btn btn-sm" style="color:var(--peligro);" id="quitarLogoBtn">Quitar logo</button>`:''}
-        </div>
-      </fieldset>
+      <p class="field-hint" style="margin-bottom:14px;">Elige un color ya combinado, o define el tuyo propio. Se aplica de inmediato y se guarda para toda la sesión.</p>
       <fieldset>
         <legend>Combinaciones listas</legend>
         <div style="display:flex; flex-wrap:wrap; gap:14px;">
@@ -784,26 +867,6 @@ function formPersonalizarColores(){
     <div class="modal-foot"><button class="btn" style="color:var(--peligro);" id="restaurarColores">Restaurar colores originales</button><button class="btn" data-close>Cerrar</button></div>
   `, true);
   bindModalClose();
-  let logoNuevoDataUrl = null;
-  document.getElementById('logoDespachoArchivo').addEventListener('change', async (ev)=>{
-    const file = ev.target.files[0]; if(!file) return;
-    if(!file.type.startsWith('image/')){ toast('Sube una imagen (PNG, JPG, etc.).'); return; }
-    try{ logoNuevoDataUrl = await resizeImageDataUrl(file, 300, 0.85); toast('Logo listo — dale clic a "Guardar" para aplicarlo.'); }
-    catch(e){ toast('No se pudo procesar la imagen.'); }
-  });
-  document.getElementById('guardarBrandingBtn').addEventListener('click', ()=>{
-    const nombreDespacho = document.getElementById('nombreDespachoInput').value.trim();
-    const nuevo = {nombreDespacho, logoDataUrl: logoNuevoDataUrl || b.logoDataUrl || ''};
-    guardarBranding(nuevo);
-    toast('Datos del despacho guardados.');
-    closeModal();
-  });
-  const quitarLogoBtn = document.getElementById('quitarLogoBtn');
-  if(quitarLogoBtn) quitarLogoBtn.addEventListener('click', ()=>{
-    guardarBranding({nombreDespacho: document.getElementById('nombreDespachoInput').value.trim(), logoDataUrl:''});
-    toast('Logo eliminado.');
-    closeModal();
-  });
   document.querySelectorAll('[data-preset]').forEach(btn=>{
     btn.addEventListener('click', ()=>{
       const preset = PALETAS_PRESET.find(p=>p.id===btn.dataset.preset);
@@ -826,12 +889,98 @@ function formPersonalizarColores(){
     closeModal();
   });
 }
+/* Alta o edición de UN despacho de la lista. id=null crea uno nuevo; con id, edita el existente. */
+function formDespacho(id){
+  const lista = getDespachos();
+  const d = id ? lista.find(x=>x.id===id) : null;
+  const esNuevo = !d;
+  const actual = d || normalizarDespacho({});
+  openModal(`
+    <div class="modal-head"><h2>${esNuevo?'Nuevo despacho':'Editar despacho'}</h2><button class="modal-close" data-close>&times;</button></div>
+    <div class="modal-body">
+      <fieldset>
+        <legend>Nombre y logo</legend>
+        <div class="field"><label>Nombre comercial *</label><input required id="nombreDespachoInput" value="${escapeAttr(actual.nombreDespacho)}" placeholder="Ej. Despacho Contable Guadiana"></div>
+        <div class="field">
+          <label>Logo</label>
+          ${actual.logoDataUrl?`<div style="margin-bottom:8px;"><img src="${actual.logoDataUrl}" style="max-height:60px; max-width:220px; object-fit:contain; border:1px solid var(--borde-fuerte); border-radius:6px; padding:6px; background:#fff;"></div>`:''}
+          <input type="file" id="logoDespachoArchivo" accept="image/*">
+          <div class="field-hint">Se ajusta automáticamente al tamaño correcto — no importa la resolución original.</div>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>Responsables y datos de contacto</legend>
+        <p class="field-hint" style="margin-bottom:10px;">Aparecen en el pie de página de los reportes de este despacho, y con [DATOS DE CONTACTO DEL DESPACHO] en las plantillas de correo.</p>
+        <div id="responsablesDespachoContainer"></div>
+        <button type="button" class="btn btn-sm" id="btnAgregarResponsableDespacho" style="margin-bottom:14px;">+ Agregar responsable</button>
+        <div class="field-row">
+          <div class="field"><label>Teléfono</label><input id="telefonoDespachoInput" value="${escapeAttr(actual.telefono)}"></div>
+          <div class="field"><label>Correo</label><input id="correoDespachoInput" value="${escapeAttr(actual.correo)}"></div>
+        </div>
+        <div class="field"><label>Dirección</label><input id="direccionDespachoInput" value="${escapeAttr(actual.direccion)}"></div>
+      </fieldset>
+    </div>
+    <div class="modal-foot"><button class="btn" data-close>Cancelar</button><button class="btn btn-primary" id="guardarDespachoBtn">Guardar</button></div>
+  `, true);
+  bindModalClose();
+
+  let responsablesState = actual.responsables.length ? JSON.parse(JSON.stringify(actual.responsables)) : [{id:uid(), nombre:'', cargo:''}];
+  const bloqueResponsableHTML = (r, i)=>`
+    <div class="field-row" data-responsable-idx="${i}" style="align-items:flex-end;">
+      <div class="field"><label>Nombre</label><input data-resp-campo="nombre" value="${escapeAttr(r.nombre||'')}" placeholder="Ej. Osiris Guadiana Navarrete"></div>
+      <div class="field"><label>Cargo</label><input data-resp-campo="cargo" value="${escapeAttr(r.cargo||'')}" placeholder="Ej. Socio Director / C.P."></div>
+      ${responsablesState.length>1?`<button type="button" class="link-btn" style="color:var(--peligro); margin-bottom:14px;" data-quitar-responsable="${i}">Quitar</button>`:''}
+    </div>`;
+  const renderResponsables = ()=>{
+    const cont = document.getElementById('responsablesDespachoContainer');
+    cont.innerHTML = responsablesState.map(bloqueResponsableHTML).join('');
+    cont.querySelectorAll('[data-resp-campo]').forEach(inp=>{
+      const idx = Number(inp.closest('[data-responsable-idx]').dataset.responsableIdx);
+      inp.addEventListener('change', ()=>{ responsablesState[idx][inp.dataset.respCampo] = inp.value; });
+    });
+    cont.querySelectorAll('[data-quitar-responsable]').forEach(btn=>{
+      btn.addEventListener('click', ()=>{ responsablesState.splice(Number(btn.dataset.quitarResponsable),1); renderResponsables(); });
+    });
+  };
+  renderResponsables();
+  document.getElementById('btnAgregarResponsableDespacho').addEventListener('click', ()=>{
+    responsablesState.push({id:uid(), nombre:'', cargo:''});
+    renderResponsables();
+  });
+
+  let logoNuevoDataUrl = null;
+  document.getElementById('logoDespachoArchivo').addEventListener('change', async (ev)=>{
+    const file = ev.target.files[0]; if(!file) return;
+    if(!file.type.startsWith('image/')){ toast('Sube una imagen (PNG, JPG, etc.).'); return; }
+    try{ logoNuevoDataUrl = await resizeImageDataUrl(file, 300, 0.85); toast('Logo listo — dale clic a "Guardar" para aplicarlo.'); }
+    catch(e){ toast('No se pudo procesar la imagen.'); }
+  });
+
+  document.getElementById('guardarDespachoBtn').addEventListener('click', ()=>{
+    const nombreDespacho = document.getElementById('nombreDespachoInput').value.trim();
+    if(!nombreDespacho){ toast('Ponle un nombre al despacho.'); return; }
+    const datos = {
+      nombreDespacho,
+      logoDataUrl: logoNuevoDataUrl || actual.logoDataUrl || '',
+      responsables: responsablesState.filter(r=> r.nombre.trim()),
+      telefono: document.getElementById('telefonoDespachoInput').value.trim(),
+      correo: document.getElementById('correoDespachoInput').value.trim(),
+      direccion: document.getElementById('direccionDespachoInput').value.trim(),
+    };
+    const listaActual = getDespachos();
+    if(d) Object.assign(d, datos);
+    else listaActual.push(normalizarDespacho(datos));
+    guardarDespachos(listaActual);
+    closeModal(); render();
+    toast('Despacho guardado.');
+  });
+}
 
 function defaultPermisos(rol){
   const all = {}; 
   MODULOS.forEach(m=>{
     if(rol==='Administrador') all[m.id] = {ver:true, editar:true};
-    else if(rol==='Contador') all[m.id] = {ver:true, editar: m.id!=='usuarios'};
+    else if(rol==='Contador') all[m.id] = {ver:true, editar: m.id!=='usuarios' && m.id!=='configuracion'};
     else if(rol==='Auxiliar') all[m.id] = {ver: m.id!=='usuarios' && m.id!=='respaldos', editar: ['contribuyentes','calendario','expediente','notas'].includes(m.id)};
     else all[m.id] = {ver:true, editar:false}; // Consulta
   });
@@ -1135,6 +1284,7 @@ function migrarContribuyentes(lista){
   let cambio = false;
   (lista||[]).forEach(t=>{
     if(t.logoDataUrl === undefined){ t.logoDataUrl = ''; cambio = true; }
+    if(t.despachoId === undefined){ t.despachoId = ''; cambio = true; }
     if(!Array.isArray(t.contactos)){
       t.contactos = [];
       if(t.contactoNombre){
@@ -2265,6 +2415,7 @@ function render(){
     respaldos: viewRespaldos,
     reportes: viewReportes,
     plantillas: viewPlantillas,
+    configuracion: viewConfiguracion,
   };
   c.innerHTML = (map[STATE.view]||viewDashboard)();
   bindViewEvents();
@@ -2527,6 +2678,30 @@ function viewContribuyenteDetalle(){
   `;
 }
 
+function formDespachoCliente(tpId){
+  const t = getTaxpayer(tpId);
+  const lista = getDespachos();
+  const principal = lista[0];
+  openModal(`
+    <div class="modal-head"><h2>Despacho responsable</h2><button class="modal-close" data-close>&times;</button></div>
+    <div class="modal-body">
+      <p class="field-hint" style="margin-bottom:10px;">Qué despacho aparece en el expediente y los reportes impresos de ${escapeHtml(t.razonSocial)}.</p>
+      <div class="field"><label>Despacho</label>
+        <select id="despachoClienteSelect">
+          <option value="">Usar el principal${principal?` (${escapeHtml(principal.nombreDespacho)})`:''}</option>
+          ${lista.map(d=>`<option value="${d.id}" ${t.despachoId===d.id?'selected':''}>${escapeHtml(d.nombreDespacho)}</option>`).join('')}
+        </select>
+      </div>
+    </div>
+    <div class="modal-foot"><button class="btn" data-close>Cancelar</button><button class="btn btn-primary" id="guardarDespachoClienteBtn">Guardar</button></div>
+  `);
+  bindModalClose();
+  document.getElementById('guardarDespachoClienteBtn').addEventListener('click', ()=>{
+    t.despachoId = document.getElementById('despachoClienteSelect').value;
+    saveTaxpayers(`Despacho responsable actualizado para ${t.razonSocial} — por ${currentUser().nombre}`, t);
+    closeModal(); render(); toast('Despacho asignado.');
+  });
+}
 function formLogoCliente(tpId){
   const t = getTaxpayer(tpId);
   openModal(`
@@ -2566,6 +2741,7 @@ function formLogoCliente(tpId){
 function tabDatos(t){
   const editable = canTaxpayer(t.id,'editar');
   const oc = t.opinionCumplimiento || {estatus:'No verificada', fecha:'', observaciones:''};
+  const despachosDisponibles = getDespachos();
   return `<div class="two-col">
     <div class="panel">
       <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:10px;">
@@ -2573,6 +2749,11 @@ function tabDatos(t){
         ${editable?`<button class="link-btn" data-action="cambiar-logo-cliente" data-id="${t.id}" style="font-size:12px;">${t.logoDataUrl?'Cambiar logo':'+ Agregar logo'}</button>`:''}
       </div>
       ${t.logoDataUrl?`<div style="margin:8px 0 12px;"><img src="${t.logoDataUrl}" alt="Logo de ${escapeAttr(t.razonSocial)}" style="max-height:56px; max-width:200px; object-fit:contain; border:1px solid var(--borde-fuerte); border-radius:6px; padding:6px; background:#fff;"></div>`:''}
+      ${despachosDisponibles.length>=2?`
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; background:#f5f6f5; border-radius:6px; padding:8px 10px; margin-bottom:12px;">
+        <div><div class="field-hint" style="margin-bottom:2px;">Despacho responsable</div><div>${escapeHtml(getDespachoDe(t.id).nombreDespacho || '(sin asignar)')}</div></div>
+        ${editable?`<button class="link-btn" data-action="cambiar-despacho-cliente" data-id="${t.id}" style="font-size:12px;">Cambiar</button>`:''}
+      </div>`:''}
       <div class="field-row">
         <div><div class="field-hint" style="margin-bottom:2px;">Nombre o razón social</div><div>${escapeHtml(t.razonSocial)}</div></div>
         <div><div class="field-hint" style="margin-bottom:2px;">RFC</div><div class="mono">${t.rfc}</div></div>
@@ -3305,11 +3486,12 @@ function startFirestoreSync(){
     if(STATE.view==='usuarios') render();
   }, ()=>{ /* silencioso: la bitácora local sigue funcionando igual */ });
 
-  unsubBranding = fsDB.collection('config').doc('despacho').onSnapshot(doc=>{
-    if(!doc.exists) return;
-    DB.set(KEYS.branding, doc.data());
+  unsubBranding = fsDB.collection('config').doc('despachos').onSnapshot(doc=>{
+    if(!doc.exists || !Array.isArray(doc.data().lista)) return;
+    DB.set(KEYS.despachos, doc.data().lista);
+    if(STATE.view==='configuracion') render();
     aplicarBrandingEnSidebar();
-  }, ()=>{ /* silencioso: el logo/nombre local se conserva igual */ });
+  }, ()=>{ /* silencioso: los despachos guardados localmente se conservan igual */ });
 
   unsubPlantillas = fsDB.collection('config').doc('plantillas').onSnapshot(doc=>{
     if(!doc.exists || !doc.data().lista) return;
@@ -3702,7 +3884,7 @@ function doBackup(tipo){
   try{
     const backups = DB.get(KEYS.backups, []);
     const taxpayersLigeros = taxpayers.map(t=> docSinArchivos(t));
-    backups.unshift({id:uid(), fecha:new Date().toISOString(), tipo, data:{taxpayers:taxpayersLigeros, users, branding:getBranding(), plantillas:getPlantillas()}});
+    backups.unshift({id:uid(), fecha:new Date().toISOString(), tipo, data:{taxpayers:taxpayersLigeros, users, despachos:getDespachos(), plantillas:getPlantillas()}});
     DB.set(KEYS.backups, backups.slice(0,10));
   }catch(e){
     // Un respaldo que no se pudo guardar (por ejemplo, por espacio lleno) nunca debe impedir que el
@@ -3926,14 +4108,20 @@ function generarReporteContribuyente(id){
     <h3 style="margin-top:18px;">Notas</h3>
     <ul>${(t.notas||[]).map(n=>`<li>${fmtDate(n.fecha)}: ${n.texto}</li>`).join('') || '<li>Sin notas</li>'}</ul>
   `;
-  imprimirReporte(`Expediente — ${t.razonSocial}`, body, {logoCliente: t.logoDataUrl, subtitulo: `RFC: ${t.rfc}`});
+  imprimirReporte(`Expediente — ${t.razonSocial}`, body, {logoCliente: t.logoDataUrl, subtitulo: `RFC: ${t.rfc}`, taxpayerId: t.id});
 }
 function imprimirReporte(titulo, bodyHtml, opciones){
   opciones = opciones || {};
-  const b = getBranding();
+  const b = opciones.taxpayerId ? getDespachoDe(opciones.taxpayerId) : getDespachoPrincipal();
   const area = document.getElementById('print-area');
   const logoDespachoHTML = b.logoDataUrl ? `<img src="${b.logoDataUrl}" alt="Logo del despacho">` : '';
   const logoClienteHTML = opciones.logoCliente ? `<img src="${opciones.logoCliente}" alt="Logo del contribuyente">` : '';
+  const contactoPartes = [
+    b.responsables.length ? b.responsables.map(r=> r.cargo? `${r.nombre} (${r.cargo})` : r.nombre).join(' · ') : '',
+    b.telefono ? `Tel: ${b.telefono}` : '',
+    b.correo ? b.correo : '',
+    b.direccion || '',
+  ].filter(Boolean);
   area.innerHTML = `
     <div class="print-header">
       <div class="print-logo-box">${logoDespachoHTML}</div>
@@ -3945,7 +4133,7 @@ function imprimirReporte(titulo, bodyHtml, opciones){
     </div>
     <div class="print-meta"><span>Generado el ${fmtDate(today())}</span>${opciones.subtitulo?`<span>${escapeHtml(opciones.subtitulo)}</span>`:''}</div>
     ${bodyHtml}
-    <div class="print-footer">${escapeHtml(b.nombreDespacho || 'Control Fiscal')} — Documento generado automáticamente</div>
+    <div class="print-footer">${escapeHtml(b.nombreDespacho || 'Control Fiscal')}${contactoPartes.length?' — '+contactoPartes.map(escapeHtml).join(' · '):''}</div>
   `;
   window.print();
 }
@@ -4025,6 +4213,7 @@ function bindViewEvents(){
   bindAction(c, 'nueva-obligacion', (el)=>{ if(!canTaxpayer(el.dataset.id,'editar')){ toast('No tienes permiso sobre este contribuyente.'); return; } formObligacion(el.dataset.id); });
   bindAction(c, 'cargar-acuse-global', (el)=>{ if(!canTaxpayer(el.dataset.id,'editar')){ toast('No tienes permiso sobre este contribuyente.'); return; } formAcuseGlobal(el.dataset.id); });
   bindAction(c, 'cambiar-logo-cliente', (el)=>{ if(!canTaxpayer(el.dataset.id,'editar')){ toast('No tienes permiso sobre este contribuyente.'); return; } formLogoCliente(el.dataset.id); });
+  bindAction(c, 'cambiar-despacho-cliente', (el)=>{ if(!canTaxpayer(el.dataset.id,'editar')){ toast('No tienes permiso sobre este contribuyente.'); return; } formDespachoCliente(el.dataset.id); });
   bindAction(c, 'editar-obligacion', (el)=>{ if(!canTaxpayer(el.dataset.id,'editar')){ toast('No tienes permiso sobre este contribuyente.'); return; } formObligacion(el.dataset.id, el.dataset.oid); });
   bindAction(c, 'borrar-obligacion', (el)=>{
     if(!canTaxpayer(el.dataset.id,'editar')){ toast('No tienes permiso sobre este contribuyente.'); return; }
@@ -4079,7 +4268,8 @@ function bindViewEvents(){
     taxpayers = b.data.taxpayers; users = b.data.users;
     migrarContribuyentes(taxpayers);
     migrarUsuarios(users);
-    if(b.data.branding) guardarBranding(b.data.branding);
+    if(b.data.despachos) guardarDespachos(b.data.despachos);
+    else if(b.data.branding) guardarDespachos([normalizarDespacho(b.data.branding)]); // respaldo de una versión anterior, con un solo despacho
     if(b.data.plantillas) guardarPlantillas(b.data.plantillas);
     saveTaxpayers(`Respaldo restaurado (respaldo ${b.tipo} del ${new Date(b.fecha).toLocaleString('es-MX')}) — por ${currentUser().nombre}`);
     saveUsers(`Respaldo restaurado (respaldo ${b.tipo} del ${new Date(b.fecha).toLocaleString('es-MX')}) — por ${currentUser().nombre}`);
@@ -4149,6 +4339,23 @@ function bindViewEvents(){
   bindAction(c, 'marcar-aniversario-atendido', (el)=>{ const t=getTaxpayer(el.dataset.id); if(t) marcarAniversarioFelicitado(t); });
   bindAction(c, 'reporte-contribuyente-select', ()=>{ const sel = document.getElementById('reporteContribSelect'); if(sel) generarReporteContribuyente(sel.value); });
   bindAction(c, 'nueva-plantilla', ()=>{ if(!can('plantillas','editar')){ toast('No tienes permiso.'); return; } formPlantilla(null); });
+  bindAction(c, 'nuevo-despacho', ()=>{ if(!can('configuracion','editar')){ toast('No tienes permiso.'); return; } formDespacho(null); });
+  bindAction(c, 'editar-despacho', (el)=>{ if(!can('configuracion','editar')){ toast('No tienes permiso.'); return; } formDespacho(el.dataset.id); });
+  bindAction(c, 'eliminar-despacho', (el)=>{
+    if(!can('configuracion','editar')){ toast('No tienes permiso.'); return; }
+    const afectados = taxpayers.filter(t=>t.despachoId===el.dataset.id);
+    const aviso = afectados.length
+      ? `¿Eliminar este despacho? ${afectados.length} contribuyente(s) lo tenían asignado y pasarán a usar el despacho principal.`
+      : '¿Eliminar este despacho?';
+    confirmarBorrado(aviso, ()=>{
+      const listaActual = getDespachos().filter(d=>d.id!==el.dataset.id);
+      guardarDespachos(listaActual);
+      afectados.forEach(t=>{ t.despachoId = ''; });
+      if(afectados.length) saveTaxpayers(`${afectados.length} contribuyente(s) reasignado(s) tras eliminar un despacho — por ${currentUser().nombre}`);
+      render(); toast('Despacho eliminado.');
+    });
+  });
+  bindAction(c, 'personalizar-colores', ()=> formPersonalizarColores());
   bindAction(c, 'editar-plantilla', (el)=>{ if(!can('plantillas','editar')){ toast('No tienes permiso.'); return; } formPlantilla(el.dataset.id); });
   bindAction(c, 'usar-plantilla', (el)=> formUsarPlantilla(el.dataset.id));
   bindAction(c, 'eliminar-plantilla', (el)=>{
@@ -4200,7 +4407,7 @@ function confirmarBorradoConPassword(msg, onYes, botonTexto){
 
 /* ---------------------------- exportar / importar ---------------------------- */
 function exportarJSON(){
-  const data = {exportado: new Date().toISOString(), taxpayers, users, branding:getBranding(), plantillas:getPlantillas()};
+  const data = {exportado: new Date().toISOString(), taxpayers, users, despachos:getDespachos(), plantillas:getPlantillas()};
   const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob); a.download = `control-fiscal-respaldo-${today()}.json`; a.click();
@@ -4217,7 +4424,8 @@ function handleImport(e){
         taxpayers = data.taxpayers; if(data.users) users = data.users;
         migrarContribuyentes(taxpayers);
         migrarUsuarios(users);
-        if(data.branding) guardarBranding(data.branding);
+        if(data.despachos) guardarDespachos(data.despachos);
+        else if(data.branding) guardarDespachos([normalizarDespacho(data.branding)]); // archivo exportado de una versión anterior
         if(data.plantillas) guardarPlantillas(data.plantillas);
         saveTaxpayers(`Información restaurada desde archivo importado (${file.name}) — por ${currentUser().nombre}`);
         saveUsers(`Información restaurada desde archivo importado (${file.name}) — por ${currentUser().nombre}`);
