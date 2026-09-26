@@ -3484,6 +3484,7 @@ function fusionarConRemoto(data){
   taxpayers = mergeTaxpayerLists(taxpayers, data.taxpayers||[]);
   users = mergeUsersLists(users, data.users||[]);
   migrarContribuyentes(taxpayers);
+  migrarUsuarios(users);
   DB.set(KEYS.taxpayers, taxpayers);
   DB.set(KEYS.users, users);
   DB.set(KEYS.audit, mergeAuditLogs(DB.get(KEYS.audit,[]), data.audit||[]));
@@ -4045,6 +4046,7 @@ function bindViewEvents(){
     const backups = DB.get(KEYS.backups, []); const b = backups.find(x=>x.id===el.dataset.id); if(!b) return;
     taxpayers = b.data.taxpayers; users = b.data.users;
     migrarContribuyentes(taxpayers);
+    migrarUsuarios(users);
     if(b.data.branding) guardarBranding(b.data.branding);
     if(b.data.plantillas) guardarPlantillas(b.data.plantillas);
     saveTaxpayers(`Respaldo restaurado (respaldo ${b.tipo} del ${new Date(b.fecha).toLocaleString('es-MX')}) — por ${currentUser().nombre}`);
@@ -4182,6 +4184,7 @@ function handleImport(e){
       confirmarBorrado('Se reemplazará la información actual con la del archivo importado — y si hay conexión a la base de datos en la nube, también se sobrescribirá para todo el despacho. ¿Continuar?', ()=>{
         taxpayers = data.taxpayers; if(data.users) users = data.users;
         migrarContribuyentes(taxpayers);
+        migrarUsuarios(users);
         if(data.branding) guardarBranding(data.branding);
         if(data.plantillas) guardarPlantillas(data.plantillas);
         saveTaxpayers(`Información restaurada desde archivo importado (${file.name}) — por ${currentUser().nombre}`);
