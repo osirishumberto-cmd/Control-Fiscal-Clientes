@@ -2990,11 +2990,11 @@ function tabNotas(t){
   return `<div class="two-col">
     <div class="panel">
       <div class="panel-row"><h2 style="margin:0;">Notas y pendientes</h2>${canTaxpayer(t.id,'editar')?`<button class="btn btn-sm btn-primary" data-action="nueva-nota" data-id="${t.id}">+ Agregar nota</button>`:''}</div>
-      ${(t.notas||[]).length? `<div style="display:flex; flex-direction:column; gap:10px;">${t.notas.slice().reverse().map(n=>`
+      ${(t.notas||[]).length? `<div style="display:flex; flex-direction:column; gap:10px;">${t.notas.slice().sort((a,b)=> String(b.fecha||'').localeCompare(String(a.fecha||''))).map(n=>`
         <div style="border:1px solid var(--borde); border-radius:var(--radio); padding:10px 12px;">
-          <div class="muted" style="font-size:11px; margin-bottom:4px;">${fmtDate(n.fecha)}</div>
+          <div class="muted" style="font-size:11px; margin-bottom:4px;">Creada el ${fmtDate(n.fecha)} · ${n.periodo? 'Corresponde a <b>'+etiquetaPeriodoNota(n.periodo)+'</b>' : 'Sin periodo asignado'}</div>
           <div>${escapeHtml(n.texto)}</div>
-          ${canTaxpayer(t.id,'editar')?`<button class="link-btn" style="color:var(--peligro); margin-top:6px;" data-action="borrar-nota" data-id="${t.id}" data-nid="${n.id}">Eliminar</button>`:''}
+          ${canTaxpayer(t.id,'editar')?`<div style="margin-top:6px; display:flex; gap:14px;"><button class="link-btn" data-action="editar-nota" data-id="${t.id}" data-nid="${n.id}">Editar</button><button class="link-btn" style="color:var(--peligro);" data-action="borrar-nota" data-id="${t.id}" data-nid="${n.id}">Eliminar</button></div>`:''}
         </div>`).join('')}</div>` : `<p class="muted">Sin notas registradas.</p>`}
     </div>
     <div class="panel">
@@ -3246,7 +3246,7 @@ function viewNotas(){
   <div class="view-head"><div><h1>Notas y seguimiento</h1><p>Pendientes y observaciones registradas en todos los contribuyentes.</p></div></div>
   ${rows.length? `<div style="display:flex; flex-direction:column; gap:10px;">${rows.map(n=>`
     <div class="panel" style="margin-bottom:0;">
-      <div class="panel-row" style="margin-bottom:6px;"><b>${escapeHtml(n.t.razonSocial)}</b><span class="muted" style="font-size:11.5px;">${fmtDate(n.fecha)}</span></div>
+      <div class="panel-row" style="margin-bottom:6px;"><b>${escapeHtml(n.t.razonSocial)}</b><span class="muted" style="font-size:11.5px;">Creada el ${fmtDate(n.fecha)} · ${n.periodo? etiquetaPeriodoNota(n.periodo) : 'Sin periodo asignado'}</span></div>
       <div>${escapeHtml(n.texto)}</div>
       <div style="margin-top:8px;"><button class="link-btn" data-open-tp-tab="${n.t.id}|notas">Ir al contribuyente →</button></div>
     </div>`).join('')}</div>` : `<div class="empty-state"><h3>Sin notas registradas</h3></div>`}
@@ -4090,6 +4090,16 @@ function generarReporteGeneral(tipo){
   }
   imprimirReporte(titulos[tipo], body);
 }
+/* Notas de un contribuyente agrupadas por el periodo (mes y ejercicio) al que corresponden,
+   en orden cronológico — no por la fecha en que se escribieron. */
+function notasAgrupadasPorPeriodoHTML(notas){
+  if(!notas.length) return '<ul><li>Sin notas</li></ul>';
+  const grupos = new Map();
+  notas.forEach(n=>{ const k = periodoNotaEfectivo(n); if(!grupos.has(k)) grupos.set(k, []); grupos.get(k).push(n); });
+  return [...grupos.keys()].sort().map(k=>`
+    <p style="margin:10px 0 2px;"><b>${escapeHtml(etiquetaPeriodoNota(k) || 'Sin periodo')}</b></p>
+    <ul style="margin-top:2px;">${grupos.get(k).sort((a,b)=> String(a.fecha||'').localeCompare(String(b.fecha||''))).map(n=>`<li>${fmtDate(n.fecha)}: ${escapeHtml(n.texto)}${n.periodo?'':' <span style="color:#888;">(sin periodo asignado — ubicada por su fecha de creación)</span>'}</li>`).join('')}</ul>`).join('');
+}
 function generarReporteContribuyente(id){
   const t = getTaxpayer(id); if(!t) return;
   if(!userCanAccessTaxpayer(currentUser(), t.id)){ toast('No tienes asignado el acceso a este contribuyente.'); return; }
@@ -4106,7 +4116,7 @@ function generarReporteContribuyente(id){
     <h3 style="margin-top:18px;">Documentos en expediente</h3>
     <ul>${(t.documentos||[]).map(d=>`<li>${d.nombre} (${d.tipo}) — ${fmtDate(d.fecha)}</li>`).join('') || '<li>Sin documentos</li>'}</ul>
     <h3 style="margin-top:18px;">Notas</h3>
-    <ul>${(t.notas||[]).map(n=>`<li>${fmtDate(n.fecha)}: ${n.texto}</li>`).join('') || '<li>Sin notas</li>'}</ul>
+    ${notasAgrupadasPorPeriodoHTML((t.notas||[]).filter(n=> notaEnRango(n, rango)))}
   `;
   imprimirReporte(`Expediente — ${t.razonSocial}`, body, {logoCliente: t.logoDataUrl, subtitulo: `RFC: ${t.rfc}`, taxpayerId: t.id});
 }
@@ -4235,6 +4245,7 @@ function bindViewEvents(){
     });
   });
   bindAction(c, 'nueva-nota', (el)=>{ if(!canTaxpayer(el.dataset.id,'editar')){ toast('No tienes permiso sobre este contribuyente.'); return; } formNota(el.dataset.id); });
+  bindAction(c, 'editar-nota', (el)=>{ if(!canTaxpayer(el.dataset.id,'editar')){ toast('No tienes permiso sobre este contribuyente.'); return; } formNota(el.dataset.id, el.dataset.nid); });
   bindAction(c, 'borrar-nota', (el)=>{
     if(!canTaxpayer(el.dataset.id,'editar')){ toast('No tienes permiso sobre este contribuyente.'); return; }
     confirmarBorrado('¿Eliminar esta nota?', ()=>{
@@ -5116,20 +5127,63 @@ function formDocumento(tpId){
   };
 }
 
-function formNota(tpId){
+/* Periodo (YYYY-MM) al que corresponde una nota. Si no se le asignó uno, se usa el mes de su
+   fecha de creación, para que las notas antiguas sigan apareciendo en los reportes. */
+function periodoNotaEfectivo(n){ return n.periodo || String(n.fecha||'').slice(0,7); }
+function etiquetaPeriodoNota(pk){
+  if(!pk || !/^\d{4}-\d{2}$/.test(pk)) return '';
+  return `${MESES_LARGOS[Number(pk.slice(5,7))-1]} ${pk.slice(0,4)}`;
+}
+function notaEnRango(n, rango){
+  const pk = periodoNotaEfectivo(n);
+  if(!pk) return true;
+  if(rango.desde && pk < rango.desde.slice(0,7)) return false;
+  if(rango.hasta && pk > rango.hasta.slice(0,7)) return false;
+  return true;
+}
+function formNota(tpId, notaId){
   const t = getTaxpayer(tpId);
+  const n = notaId ? (t.notas||[]).find(x=>x.id===notaId) : null;
+  // Por defecto se sugiere el mes anterior a la fecha de hoy (el que normalmente se está declarando).
+  const hoy = new Date();
+  const ant = new Date(hoy.getFullYear(), hoy.getMonth()-1, 1);
+  let mesSel = n ? (n.periodo? Number(n.periodo.slice(5,7)) : 0) : ant.getMonth()+1;
+  let anioSel = n ? (n.periodo? Number(n.periodo.slice(0,4)) : hoy.getFullYear()) : ant.getFullYear();
+  const anios = []; for(let a=hoy.getFullYear()-5; a<=hoy.getFullYear()+1; a++) anios.push(a);
+  if(!anios.includes(anioSel)) anios.push(anioSel);
+  anios.sort((a,b)=>a-b);
   openModal(`
-    <div class="modal-head"><h2>Nueva nota</h2><button class="modal-close" data-close>&times;</button></div>
-    <div class="modal-body"><form id="formNota"><div class="field"><label>Nota / pendiente / observación</label><textarea required name="texto" rows="4" autofocus></textarea></div></form></div>
+    <div class="modal-head"><h2>${n?'Editar nota':'Nueva nota'}</h2><button class="modal-close" data-close>&times;</button></div>
+    <div class="modal-body"><form id="formNota">
+      <div class="field"><label>Nota / pendiente / observación</label><textarea required name="texto" rows="4" autofocus>${n?escapeAttr(n.texto):''}</textarea></div>
+      <div class="field-row">
+        <div class="field"><label>Fecha de creación</label><input type="date" name="fecha" value="${n?(n.fecha||today()):today()}"></div>
+        <div class="field"><label>Mes al que corresponde</label>
+          <select name="mes"><option value="0" ${mesSel===0?'selected':''}>— Sin periodo específico —</option>
+            ${MESES_LARGOS.map((m,i)=>`<option value="${i+1}" ${mesSel===i+1?'selected':''}>${m}</option>`).join('')}</select></div>
+        <div class="field"><label>Ejercicio</label>
+          <select name="anio">${anios.map(a=>`<option ${a===anioSel?'selected':''}>${a}</option>`).join('')}</select></div>
+      </div>
+      <div class="field-hint">La fecha de creación es cuándo se escribió la nota; el mes y ejercicio son el periodo de impuestos al que se refiere — con ese periodo aparecerá en los reportes.</div>
+    </form></div>
     <div class="modal-foot"><button class="btn" data-close>Cancelar</button><button class="btn btn-primary" id="saveNota">Guardar</button></div>
   `);
   bindModalClose();
   document.getElementById('saveNota').onclick = ()=>{
     const f = document.getElementById('formNota');
     if(!f.texto.value.trim()){ toast('Escribe una nota.'); return; }
-    t.notas = t.notas||[]; t.notas.push({id:uid(), fecha:today(), texto:f.texto.value.trim()});
-    logHistorial(t,'Nota agregada');
-    saveTaxpayers(`Nota agregada en ${t.razonSocial} — por ${currentUser().nombre}`, t);
+    if(!f.fecha.value){ toast('Indica la fecha de creación.'); return; }
+    const mes = Number(f.mes.value);
+    const periodo = mes ? `${f.anio.value}-${String(mes).padStart(2,'0')}` : '';
+    t.notas = t.notas||[];
+    if(n){
+      Object.assign(n, {texto:f.texto.value.trim(), fecha:f.fecha.value, periodo});
+      logHistorial(t,'Nota editada');
+    } else {
+      t.notas.push({id:uid(), fecha:f.fecha.value, periodo, texto:f.texto.value.trim()});
+      logHistorial(t,'Nota agregada');
+    }
+    saveTaxpayers(`Nota ${n?'editada':'agregada'} en ${t.razonSocial} — por ${currentUser().nombre}`, t);
     closeModal(); render(); toast('Nota guardada.');
   };
 }
