@@ -2422,10 +2422,69 @@ function render(){
 }
 
 /* ---------------------------- DASHBOARD ---------------------------- */
+const FRASES_MOTIVACIONALES = [
+  'Un cliente bien atendido hoy es una relación de años mañana.',
+  'La constancia con los plazos es lo que distingue a un buen despacho.',
+  'Cada declaración presentada a tiempo es tranquilidad para alguien más.',
+  'El orden de hoy evita el estrés del último día.',
+  'Pequeños avances diarios construyen la confianza de tus clientes.',
+  'La precisión no es casualidad, es método.',
+  'Hoy es un buen día para dejar todo un poco más en orden.',
+  'Un despacho confiable se construye una obligación a la vez.',
+  'Revisar con calma hoy evita correcciones mañana.',
+  'La mejor defensa ante el SAT es la información al día.',
+  'Tu atención al detalle es lo que tus clientes no ven, pero siempre agradecen.',
+  'Ir un paso adelante del vencimiento es la mejor estrategia.',
+  'El trabajo bien documentado de hoy es la tranquilidad de mañana.',
+  'Cada cliente que confía en ti merece tu mejor esfuerzo, todos los días.',
+  'La organización de hoy es menos prisa la próxima semana.',
+  // Frases motivacionales generales (no específicas del despacho)
+  'Un pequeño progreso cada día suma grandes resultados.',
+  'No tienes que ser perfecto, solo constante.',
+  'El esfuerzo de hoy es el resultado de mañana.',
+  'Empieza donde estás, usa lo que tienes, haz lo que puedas.',
+  'La disciplina vence a la motivación cuando esta última se agota.',
+  'Cada día es una nueva oportunidad para hacerlo un poco mejor.',
+  'Las grandes metas se alcanzan con pasos pequeños y constantes.',
+  'El orden de tus tareas es el primer paso hacia tus metas.',
+  'No cuentes los días, haz que los días cuenten.',
+  'La actitud con la que empiezas el día define cómo lo terminas.',
+  'Enfócate en el progreso, no en la perfección.',
+  'Un buen día comienza con una buena actitud.',
+  'El éxito es la suma de pequeños esfuerzos repetidos día tras día.',
+  'Tu mejor versión se construye con la constancia de hoy.',
+  'Respira, organiza tus prioridades, y avanza con calma.',
+  'Cada tarea cumplida es un paso más cerca de tus metas.',
+];
+/* Se elige por día del año, así que es la misma frase durante todo el día y cambia al siguiente. */
+function fraseMotivacionalDelDia(){
+  const inicio = new Date(new Date().getFullYear(), 0, 0);
+  const diff = new Date() - inicio;
+  const diaDelAnio = Math.floor(diff / 86400000);
+  return FRASES_MOTIVACIONALES[diaDelAnio % FRASES_MOTIVACIONALES.length];
+}
+function saludoHorario(){
+  const h = new Date().getHours();
+  if(h < 12) return 'Buenos días';
+  if(h < 19) return 'Buenas tardes';
+  return 'Buenas noches';
+}
+function panelBienvenida(){
+  const u = currentUser();
+  const nombre = (u.nombre||'').split(' ')[0] || u.nombre;
+  return `
+  <div class="panel" style="margin-bottom:16px; background:linear-gradient(135deg, var(--verde-950), var(--verde-800)); color:#fff;">
+    <h2 style="margin:0 0 4px; color:#fff;">${saludoHorario()}, ${escapeHtml(nombre)} 👋</h2>
+    <p style="margin:0 0 8px; opacity:.85; font-size:13px;">Bienvenido de nuevo a Control Fiscal.</p>
+    <p style="margin:0; font-style:italic; opacity:.95;">"${escapeHtml(fraseMotivacionalDelDia())}"</p>
+  </div>
+  `;
+}
 function viewDashboard(){
   const vencidas = countVencidas(), proximas = countProximas(), efirmas = countEfirmaProximas(), csds = countCsdProximas(), avisos = countAvisosPendientes();
 
   return `
+  ${panelBienvenida()}
   <div class="view-head">
     <div><h1>Dashboard general</h1><p>Panorama de cumplimiento de todos los contribuyentes al ${fmtDate(today())}.</p></div>
     <div style="display:flex; gap:8px;">
