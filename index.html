@@ -691,11 +691,13 @@ function guardarPlantillas(lista){
 function viewConfiguracion(){
   const lista = getDespachos();
   const editable = can('configuracion','editar');
+  const sospechosas = editable ? obligacionesSospechosasVencimiento() : [];
   return `
   <div class="view-head">
     <div><h1>Configuración del sistema</h1><p>Despachos registrados en este sistema — cada contribuyente se asigna a uno de ellos.</p></div>
     ${editable?`<button class="btn btn-primary" data-action="nuevo-despacho">+ Agregar despacho</button>`:''}
   </div>
+  ${sospechosas.length? `<div class="notice" style="margin-bottom:14px;">⚠️ Se encontraron <b>${sospechosas.length}</b> obligación(es) mensual(es) con vencimiento probablemente mal calculado (del error ya corregido de "hoy + 17 días"). <button class="btn btn-sm" data-action="revisar-vencimientos" style="margin-left:6px;">Revisar y corregir</button></div>` : ''}
   ${!lista.length ? `
   <div class="panel">
     <p class="muted">Todavía no has registrado ningún despacho.</p>
@@ -1071,6 +1073,100 @@ function calcularVencimientoObligacion(periodoYYYYMM, rfc){
   const conExtra = addDays(dia17, diasExtraPorRFC(rfc));
   return siguienteDiaHabil(conExtra);
 }
+/* Detecta obligaciones mensuales que quedaron con un vencimiento equivocado por el error de "hoy
+   + 17 días" que tenía el alta de contribuyentes (ya corregido). La señal confiable es: periodicidad
+   Mensual, sin el campo "periodo" guardado (todos los demás caminos del sistema sí lo guardan), y
+   con el vencimiento en un día anterior al 17 — algo que la fórmula correcta nunca puede producir.
+   Nunca toca obligaciones que vinieron de leer un acuse real, ni las generadas automáticamente por
+   el sistema, porque esas siempre tienen su periodo guardado. */
+function obligacionesSospechosasVencimiento(){
+  const filas = [];
+  taxpayers.forEach(t=>{
+    (t.obligaciones||[]).forEach(o=>{
+      if(o.periodicidad!=='Mensual' || o.periodo) return;
+      if(!o.vencimiento) return;
+      const diaMes = Number(o.vencimiento.slice(8,10));
+      if(isNaN(diaMes) || diaMes >= 17) return;
+      const base = t.fechaAlta || o.vencimiento;
+      const periodoSugerido = sumarMeses(base.slice(0,7)+'-01', -1).slice(0,7);
+      filas.push({taxpayerId:t.id, contribuyente:t.razonSocial, rfc:t.rfc, obligacionId:o.id, tipo:o.tipo, vencimientoActual:o.vencimiento, periodoSugerido});
+    });
+  });
+  return filas;
+}
+function formRevisarVencimientosSospechosos(){
+  const filas = obligacionesSospechosasVencimiento();
+  if(!filas.length){ toast('No se encontró ninguna obligación con este problema. Todo en orden.'); return; }
+  openModal(`
+    <div class="modal-head"><h2>Vencimientos a corregir (${filas.length})</h2><button class="modal-close" data-close>&times;</button></div>
+    <div class="modal-body">
+      <div class="notice info">Estas obligaciones quedaron con el vencimiento equivocado por el error de "hoy + 17 días" que ya corregimos en el alta de contribuyentes. Revisa el periodo sugerido de cada una (puedes ajustarlo si no es el correcto) y aplica la corrección.</div>
+      <div class="table-wrap" style="margin-top:10px; max-height:420px; overflow-y:auto;">
+        <table>
+          <thead><tr><th><input type="checkbox" id="chkTodosVenc" checked></th><th>Contribuyente</th><th>Obligación</th><th>Vencimiento actual</th><th>Periodo (mes que declara)</th><th>Vencimiento corregido</th></tr></thead>
+          <tbody>
+            ${filas.map((r,i)=>{
+              const [anio,mes] = r.periodoSugerido.split('-');
+              return `<tr data-fila="${i}">
+                <td><input type="checkbox" class="chkFilaVenc" checked></td>
+                <td>${escapeHtml(r.contribuyente)}</td>
+                <td>${escapeHtml(r.tipo)}</td>
+                <td class="mono">${fmtDate(r.vencimientoActual)}</td>
+                <td>
+                  <select class="selMesVenc" style="width:auto; display:inline-block;">${MESES_LARGOS.map((m,idx)=>`<option value="${idx+1}" ${idx+1===Number(mes)?'selected':''}>${m}</option>`).join('')}</select>
+                  <select class="selAnioVenc" style="width:auto; display:inline-block;">${[Number(anio)-1,Number(anio),Number(anio)+1].map(a=>`<option ${a===Number(anio)?'selected':''}>${a}</option>`).join('')}</select>
+                </td>
+                <td class="mono venc-corregido">${fmtDate(calcularVencimientoObligacion(r.periodoSugerido, r.rfc))}</td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="modal-foot"><button class="btn" data-close>Cancelar</button><button class="btn btn-primary" id="aplicarCorreccionVenc">Aplicar correcciones seleccionadas</button></div>
+  `, true);
+  bindModalClose();
+  const tabla = document.querySelector('.table-wrap table');
+  const actualizarFila = (tr, r)=>{
+    const mes = Number(tr.querySelector('.selMesVenc').value);
+    const anio = Number(tr.querySelector('.selAnioVenc').value);
+    const periodo = `${anio}-${String(mes).padStart(2,'0')}`;
+    tr.querySelector('.venc-corregido').textContent = fmtDate(calcularVencimientoObligacion(periodo, r.rfc));
+  };
+  tabla.querySelectorAll('tr[data-fila]').forEach(tr=>{
+    const r = filas[Number(tr.dataset.fila)];
+    tr.querySelector('.selMesVenc').addEventListener('change', ()=> actualizarFila(tr, r));
+    tr.querySelector('.selAnioVenc').addEventListener('change', ()=> actualizarFila(tr, r));
+  });
+  document.getElementById('chkTodosVenc').addEventListener('change', (e)=>{
+    tabla.querySelectorAll('.chkFilaVenc').forEach(c=> c.checked = e.target.checked);
+  });
+  document.getElementById('aplicarCorreccionVenc').addEventListener('click', ()=>{
+    let corregidas = 0;
+    tabla.querySelectorAll('tr[data-fila]').forEach(tr=>{
+      if(!tr.querySelector('.chkFilaVenc').checked) return;
+      const r = filas[Number(tr.dataset.fila)];
+      const t = getTaxpayer(r.taxpayerId);
+      const o = t && (t.obligaciones||[]).find(x=>x.id===r.obligacionId);
+      if(!t || !o) return;
+      const mes = Number(tr.querySelector('.selMesVenc').value);
+      const anio = Number(tr.querySelector('.selAnioVenc').value);
+      const periodo = `${anio}-${String(mes).padStart(2,'0')}`;
+      o.periodo = periodo;
+      o.vencimiento = calcularVencimientoObligacion(periodo, t.rfc);
+      o.notas = (o.notas? o.notas+' ':'') + `Vencimiento corregido el ${fmtDate(today())} (error de alta ya resuelto).`;
+      logHistorial(t, `Vencimiento corregido de "${o.tipo}": ${fmtDate(r.vencimientoActual)} → ${fmtDate(o.vencimiento)}`);
+      corregidas++;
+    });
+    if(corregidas){
+      saveTaxpayers(`Corrección masiva de vencimientos (${corregidas} obligación[es]) — por ${currentUser().nombre}`);
+      toast(`${corregidas} obligación(es) corregida(s).`);
+    } else {
+      toast('No seleccionaste ninguna fila.');
+    }
+    closeModal(); render();
+  });
+}
 const MESES_POR_PERIODICIDAD = {Mensual:1, Bimestral:2, Trimestral:3, Cuatrimestral:4, Semestral:6, Anual:12};
 /* Genera automáticamente la siguiente obligación pendiente de cada tipo recurrente (según su
    periodicidad) para todos los contribuyentes, cuando ya venció el periodo anterior. Si nadie
@@ -1113,18 +1209,24 @@ function generarObligacionesDelPeriodo(){
         }
       } else {
         // Periodicidades no mensuales (Bimestral, Trimestral, Cuatrimestral, Semestral, Anual):
-        // se conserva el cálculo anterior, sumando directamente al vencimiento — el usuario no
-        // especificó una regla de día hábil/RFC para estas, así que no se inventa una.
-        let siguiente = sumarMeses(ultima.vencimiento, meses);
-        while(siguiente <= today() && guardia < 60){
+        // el SAT usa la MISMA regla del día 17 + sexto dígito del RFC + día hábil — lo único que
+        // cambia es cuántos meses abarca cada periodo. "periodoActual" guarda el último mes del
+        // periodo ya declarado (ej. un bimestral Jul-Ago se guarda como "2026-08"), y el siguiente
+        // periodo avanza esa misma cantidad de meses.
+        let periodoActual = ultima.periodo || (ultima.vencimiento ? sumarMeses(ultima.vencimiento.slice(0,7)+'-01', -1).slice(0,7) : null);
+        if(!periodoActual) return;
+        let siguientePeriodo = sumarMeses(periodoActual+'-01', meses).slice(0,7);
+        let siguienteVenc = calcularVencimientoObligacion(siguientePeriodo, t.rfc);
+        while(siguienteVenc <= today() && guardia < 60){
           guardia++;
-          const yaExiste = t.obligaciones.some(o=>o.tipo===tipo && o.vencimiento===siguiente);
+          const yaExiste = t.obligaciones.some(o=>o.tipo===tipo && o.periodo===siguientePeriodo);
           if(!yaExiste){
-            t.obligaciones.push({id:uid(), tipo, periodicidad:ultima.periodicidad, periodo: sumarMeses(siguiente.slice(0,7)+'-01', -1).slice(0,7), vencimiento:siguiente, estatus:'Pendiente', responsable:'', revisor:'', declaraciones:[], fechaPresentacion:'', fechaPago:'', numOperacion:'', montoPagar:'', lineaCaptura:'', acuse:null, notas:'Generada automáticamente al iniciar el nuevo periodo.'});
+            t.obligaciones.push({id:uid(), tipo, periodicidad:ultima.periodicidad, periodo:siguientePeriodo, vencimiento:siguienteVenc, estatus:'Pendiente', responsable:'', revisor:'', declaraciones:[], fechaPresentacion:'', fechaPago:'', numOperacion:'', montoPagar:'', lineaCaptura:'', acuse:null, notas:'Generada automáticamente al iniciar el nuevo periodo.'});
             totalGeneradas++;
-            detalle.push({contribuyente:t.razonSocial, taxpayerId:t.id, tipo, vencimiento:siguiente});
+            detalle.push({contribuyente:t.razonSocial, taxpayerId:t.id, tipo, vencimiento:siguienteVenc});
           }
-          siguiente = sumarMeses(siguiente, meses);
+          siguientePeriodo = sumarMeses(siguientePeriodo+'-01', meses).slice(0,7);
+          siguienteVenc = calcularVencimientoObligacion(siguientePeriodo, t.rfc);
         }
       }
     });
@@ -4410,6 +4512,7 @@ function bindViewEvents(){
   bindAction(c, 'reporte-contribuyente-select', ()=>{ const sel = document.getElementById('reporteContribSelect'); if(sel) generarReporteContribuyente(sel.value); });
   bindAction(c, 'nueva-plantilla', ()=>{ if(!can('plantillas','editar')){ toast('No tienes permiso.'); return; } formPlantilla(null); });
   bindAction(c, 'nuevo-despacho', ()=>{ if(!can('configuracion','editar')){ toast('No tienes permiso.'); return; } formDespacho(null); });
+  bindAction(c, 'revisar-vencimientos', ()=>{ if(!can('configuracion','editar')){ toast('No tienes permiso.'); return; } formRevisarVencimientosSospechosos(); });
   bindAction(c, 'editar-despacho', (el)=>{ if(!can('configuracion','editar')){ toast('No tienes permiso.'); return; } formDespacho(el.dataset.id); });
   bindAction(c, 'eliminar-despacho', (el)=>{
     if(!can('configuracion','editar')){ toast('No tienes permiso.'); return; }
@@ -4664,7 +4767,14 @@ function formContribuyente(t, prefill){
         buzonCorreo:'', buzonTelefono:'', opinionCumplimiento:{estatus:'No verificada', fecha:'', observaciones:''},
         actividadesEconomicas: pf.actividades||[],
         contactos:[],
-        obligaciones: tiposObligaciones.map(tipo=>({id:uid(), tipo, periodicidad:'Mensual', vencimiento: addDays(today(),17), estatus:'Pendiente', responsable:'', revisor:'', fechaPresentacion:'', fechaPago:'', numOperacion:'', montoPagar:'', lineaCaptura:'', acuse:null, notas:''})),
+        obligaciones: tiposObligaciones.map(tipo=>{
+          // El periodo inicial que se sugiere es el mes anterior a hoy (el que normalmente sigue
+          // pendiente al dar de alta a un cliente), y el vencimiento se calcula con la MISMA regla
+          // que el resto del sistema: día 17 del mes siguiente al periodo + sexto dígito del RFC +
+          // ajuste a día hábil — nunca "hoy más 17 días", que no corresponde a ninguna regla real.
+          const periodoInicial = sumarMeses(today().slice(0,7)+'-01', -1).slice(0,7);
+          return {id:uid(), tipo, periodicidad:'Mensual', periodo:periodoInicial, vencimiento: calcularVencimientoObligacion(periodoInicial, f.rfc.value.trim().toUpperCase()), estatus:'Pendiente', responsable:'', revisor:'', declaraciones:[], fechaPresentacion:'', fechaPago:'', numOperacion:'', montoPagar:'', lineaCaptura:'', acuse:null, notas:''};
+        }),
         efirma:{emision:'', vencimiento:'', estatus:'Vigente'}, csd:{emision:'', vencimiento:'', estatus:'Vigente'},
         documentos: pendingCSF? [{id:uid(), nombre:pendingCSF.nombre, tipo:'Constancia de Situación Fiscal', fecha:today(), mime:pendingCSF.mime, dataUrl:pendingCSF.dataUrl}] : [],
         notas:[], historial:[{fecha:today(), hora:new Date().toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'}), accion:'Contribuyente registrado en el sistema', responsable:currentUser().nombre}],
@@ -4734,17 +4844,18 @@ function formObligacion(tpId, oId){
   `, true);
   bindModalClose();
 
-  // ---- Ejercicio + Periodo (mes) -> vencimiento automático (solo para periodicidad Mensual) ----
+  // ---- Ejercicio + Periodo (mes) -> vencimiento automático (cualquier periodicidad con periodo definido) ----
   const selPeriodicidadObl = document.getElementById('selPeriodicidadObl');
   const ejercicioObl = document.getElementById('ejercicioObl');
   const mesObl = document.getElementById('mesObl');
   const vencimientoObl = document.getElementById('vencimientoObl');
   const hintVencimiento = document.getElementById('hintVencimiento');
   const periodoCombinado = ()=> (ejercicioObl.value && mesObl.value) ? `${ejercicioObl.value}-${String(mesObl.value).padStart(2,'0')}` : '';
+  const aplicaCalculoAuto = ()=> selPeriodicidadObl.value!=='Única vez' && selPeriodicidadObl.value!=='Sin periodo';
   const actualizarVencimientoAuto = ()=>{
     const periodo = periodoCombinado();
-    hintVencimiento.style.display = selPeriodicidadObl.value==='Mensual' && periodo ? 'block' : 'none';
-    if(selPeriodicidadObl.value==='Mensual' && periodo){
+    hintVencimiento.style.display = aplicaCalculoAuto() && periodo ? 'block' : 'none';
+    if(aplicaCalculoAuto() && periodo){
       vencimientoObl.value = calcularVencimientoObligacion(periodo, t.rfc);
     }
   };
