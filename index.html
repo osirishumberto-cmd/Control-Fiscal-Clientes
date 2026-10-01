@@ -1083,17 +1083,20 @@ function obligacionesSospechosasVencimiento(){
   const filas = [];
   taxpayers.forEach(t=>{
     (t.obligaciones||[]).forEach(o=>{
-      if(o.periodicidad!=='Mensual' || o.periodo) return; // si ya tiene periodo guardado, no es este caso
-      if(!o.vencimiento) return;
-      // Se compara contra lo que la regla oficial daría para el mes inmediato anterior al mes del
-      // vencimiento guardado (el caso más común) — si coincide, en realidad está bien y solo le
-      // faltaba la etiqueta de periodo; si no coincide, es el vencimiento el que está mal, sin
-      // importar en qué día del mes haya caído (el error anterior solo revisaba si el día era menor
-      // a 17, y eso dejaba pasar los casos donde el alta ocurrió a principios de mes).
-      const periodoImplicito = sumarMeses(o.vencimiento.slice(0,7)+'-01', -1).slice(0,7);
-      if(o.vencimiento === calcularVencimientoObligacion(periodoImplicito, t.rfc)) return;
-      const base = t.fechaAlta || o.vencimiento;
-      const periodoSugerido = sumarMeses(base.slice(0,7)+'-01', -1).slice(0,7);
+      // Solo se revisan las que SIGUEN pendientes — nunca se toca una ya presentada, aunque su
+      // vencimiento no coincida con la fórmula (pudo tener de por medio un día inhábil real u otra
+      // razón legítima; ya es historial y no debe alterarse).
+      if(o.periodicidad!=='Mensual' || o.estatus!=='Pendiente' || !o.vencimiento) return;
+      // Importante: aunque el campo "periodo" ya esté relleno, una migración anterior del propio
+      // sistema lo completa automáticamente a partir del vencimiento (mes del vencimiento menos uno)
+      // para datos antiguos — por lo que un periodo "presente" no garantiza que sea el correcto. Por
+      // eso se compara siempre contra la fórmula oficial, tenga o no periodo guardado.
+      const periodoActual = o.periodo || sumarMeses(o.vencimiento.slice(0,7)+'-01', -1).slice(0,7);
+      if(o.vencimiento === calcularVencimientoObligacion(periodoActual, t.rfc)) return; // coincide: está bien
+      // El periodo que se sugiere por default es un mes antes del que quedó registrado (o inferido),
+      // que es justo la relación que deja el error original + la migración que rellena el periodo
+      // faltante. Siempre editable antes de aplicar, por si en algún caso no es el correcto.
+      const periodoSugerido = sumarMeses(periodoActual+'-01', -1).slice(0,7);
       filas.push({taxpayerId:t.id, contribuyente:t.razonSocial, rfc:t.rfc, obligacionId:o.id, tipo:o.tipo, vencimientoActual:o.vencimiento, periodoSugerido});
     });
   });
