@@ -419,6 +419,7 @@ const REGIMENES = [
   {clave:'615', nombre:'Ingresos por Obtención de Premios'},
   {clave:'616', nombre:'Sin Obligaciones Fiscales'},
   {clave:'620', nombre:'Sociedades Cooperativas de Producción'},
+  {clave:'621', nombre:'Incorporación Fiscal'},
   {clave:'622', nombre:'Actividades Agrícolas, Ganaderas, Silvícolas y Pesqueras'},
   {clave:'623', nombre:'Opcional para Grupos de Sociedades'},
   {clave:'624', nombre:'Coordinados'},
@@ -429,7 +430,7 @@ const REGIMENES = [
 // 622, 624, 626) admiten tanto persona física como moral, así que se dejan sin sugerencia.
 const REGIMEN_TIPO_PERSONA = {
   '601':'Moral', '603':'Moral', '605':'Física', '606':'Física', '607':'Física', '608':'Física',
-  '611':'Física', '612':'Física', '614':'Física', '615':'Física', '616':'Física',
+  '611':'Física', '612':'Física', '614':'Física', '615':'Física', '616':'Física', '621':'Física',
   '620':'Moral', '623':'Moral', '625':'Física',
 };
 function sugerirTipoPersona(regimenClave){ return REGIMEN_TIPO_PERSONA[regimenClave] || ''; }
@@ -2761,7 +2762,11 @@ function filteredTaxpayers(){
 }
 
 function viewContribuyentes(){
-  const list = filteredTaxpayers().slice().sort((a,b)=> a.razonSocial.localeCompare(b.razonSocial, 'es'));
+  const despachosDisponibles = getDespachos();
+  let list = filteredTaxpayers().slice().sort((a,b)=> a.razonSocial.localeCompare(b.razonSocial, 'es'));
+  if(despachosDisponibles.length>=2 && STATE.contribDespachoFiltro){
+    list = list.filter(t=> getDespachoDe(t.id).id === STATE.contribDespachoFiltro);
+  }
   const SIN_RESPONSABLE = 'Sin responsable específico asignado';
   const grupos = new Map();
   list.forEach(t=>{
@@ -2799,6 +2804,10 @@ function viewContribuyentes(){
     </div>`:''}
   </div>
   ${STATE.search? `<div class="notice info">Filtrando por: "<b>${escapeHtml(STATE.search)}</b>" — <button class="link-btn" data-action="clear-search">quitar filtro</button></div>`:''}
+  ${despachosDisponibles.length>=2? `<div class="chip-row" style="margin-bottom:10px;">
+    <button class="chip ${!STATE.contribDespachoFiltro?'active':''}" data-action="filtro-despacho-contrib" data-despacho="">Todos los despachos</button>
+    ${despachosDisponibles.map(d=>`<button class="chip ${STATE.contribDespachoFiltro===d.id?'active':''}" data-action="filtro-despacho-contrib" data-despacho="${d.id}">${escapeHtml(d.nombreDespacho)}</button>`).join('')}
+  </div>`:''}
   ${list.length? nombresGrupos.map(resp=>`
     <div class="panel" style="margin-bottom:14px; padding:0; overflow:hidden;">
       <div style="padding:10px 16px; background:var(--papel-2); font-weight:600; font-size:13px;">
@@ -3081,6 +3090,8 @@ function tabObligaciones(t){
     <h2 style="margin:0;">Obligaciones fiscales registradas</h2>
     ${canTaxpayer(t.id,'editar')?`<div style="display:flex; gap:8px;">
       <button class="btn btn-sm" data-action="cargar-acuse-global" data-id="${t.id}">📎 Cargar acuse</button>
+      <button class="btn btn-sm" data-action="cargar-acuses-masivo" data-id="${t.id}">📎 Cargar varios acuses</button>
+      <a class="btn btn-sm" href="https://www.sat.gob.mx" target="_blank" rel="noopener noreferrer" title="Abre el portal del SAT en una pestaña nueva para descargar los acuses">↗ Abrir portal del SAT</a>
       <button class="btn btn-sm btn-primary" data-action="nueva-obligacion" data-id="${t.id}">+ Agregar obligación</button>
     </div>`:''}
   </div>
@@ -4144,8 +4155,21 @@ function viewReportes(){
     {id:'efirmas', nombre:'e.firmas próximas a vencer', desc:'Contribuyentes con e.firma por vencer en 30 días.'},
     {id:'csd', nombre:'CSD próximos a vencer', desc:'Contribuyentes con CSD por vencer en 30 días.'},
   ];
+  const despachosDisponibles = getDespachos();
+  const contribuyentesParaExpediente = despachosDisponibles.length>=2
+    ? scopedTaxpayers().filter(t=> !leerDespachoFiltroReporte() || getDespachoDe(t.id).id===leerDespachoFiltroReporte())
+    : scopedTaxpayers();
   return `
   <div class="view-head"><div><h1>Reportes</h1><p>Genera reportes imprimibles listos para entregar o archivar.</p></div></div>
+  ${despachosDisponibles.length>=2? `
+  <div class="panel" style="margin-bottom:16px;">
+    <h2 style="margin-top:0; font-size:15px;">Despacho</h2>
+    <p class="field-hint" style="margin-bottom:10px;">Con varios despachos registrados, cada reporte incluye solo a los contribuyentes del despacho que elijas aquí — para que nunca se mezclen los de uno con los de otro.</p>
+    <select id="reporteDespachoFiltro" onchange="render()">
+      <option value="">Todos los despachos (sin separar)</option>
+      ${despachosDisponibles.map(d=>`<option value="${d.id}" ${STATE.reporteDespachoFiltro===d.id?'selected':''}>${escapeHtml(d.nombreDespacho)}</option>`).join('')}
+    </select>
+  </div>`:''}
   <div class="panel" style="margin-bottom:16px;">
     <h2 style="margin-top:0; font-size:15px;">Rango de fechas (opcional)</h2>
     <p class="field-hint" style="margin-bottom:10px;">Filtra los reportes de obligaciones por su fecha de vencimiento. Si dejas los campos vacíos, se incluye toda la información disponible.</p>
@@ -4164,11 +4188,18 @@ function viewReportes(){
     <div class="doc-card" style="gap:10px;">
       <h3 style="margin:0; font-size:14.5px;">Expediente de un contribuyente</h3>
       <select id="reporteContribSelect" class="field-hint" style="width:100%; padding:6px; border:1px solid var(--borde-fuerte); border-radius:4px;">
-        ${scopedTaxpayers().map(t=>`<option value="${t.id}">${t.razonSocial}</option>`).join('')}
+        ${contribuyentesParaExpediente.map(t=>`<option value="${t.id}">${t.razonSocial}</option>`).join('')}
       </select>
       <button class="btn btn-sm" data-action="reporte-contribuyente-select">Generar reporte</button>
     </div>
   </div>`;
+}
+// Lee el despacho elegido para filtrar reportes directamente del <select> (si ya está en pantalla),
+// y si no, del último valor guardado en STATE — así el filtro no se "olvida" entre redibujados.
+function leerDespachoFiltroReporte(){
+  const sel = document.getElementById('reporteDespachoFiltro');
+  if(sel){ STATE.reporteDespachoFiltro = sel.value; }
+  return STATE.reporteDespachoFiltro || '';
 }
 function leerRangoFechasReporte(){
   const desde = document.getElementById('reporteFechaDesde');
@@ -4242,22 +4273,27 @@ function tablaObligacionesPorTipo(rows){
 function generarReporteGeneral(tipo){
   const titulos = {pendientes:'Obligaciones pendientes', presentadas:'Obligaciones presentadas', vencimientos:'Próximos vencimientos (15 días)', efirmas:'e.firmas próximas a vencer', csd:'CSD próximos a vencer'};
   const rango = leerRangoFechasReporte();
+  // Si hay 2 o más despachos registrados y se eligió uno específico, el reporte se limita a los
+  // contribuyentes de ESE despacho — así nunca se mezclan los de uno con los de otro.
+  const despachoFiltro = getDespachos().length>=2 ? leerDespachoFiltroReporte() : '';
+  const esDelDespachoFiltrado = (taxpayerId)=> !despachoFiltro || getDespachoDe(taxpayerId).id === despachoFiltro;
   let body = '';
+  let subtituloDespacho = despachoFiltro ? `Despacho: ${getDespachos().find(d=>d.id===despachoFiltro).nombreDespacho}` : '';
   if(tipo==='pendientes' || tipo==='presentadas'){
     const est = tipo==='pendientes'? ETAPAS_OBL.slice(0, indiceEtapaObl('Presentada')) : ETAPAS_OBL.slice(indiceEtapaObl('Presentada'));
-    const rows = allObligacionesFlat().filter(o=> est.includes(o.estatus) && dentroDeRango(o.vencimiento, rango)).sort((a,b)=>a.vencimiento.localeCompare(b.vencimiento));
+    const rows = allObligacionesFlat().filter(o=> est.includes(o.estatus) && dentroDeRango(o.vencimiento, rango) && esDelDespachoFiltrado(o.taxpayerId)).sort((a,b)=>a.vencimiento.localeCompare(b.vencimiento));
     body = reporteTablaObligacionesPivot(rows, true);
   } else if(tipo==='vencimientos'){
-    const rows = allObligacionesFlat().filter(o=> obligacionPendienteDePresentar(o) && daysBetween(today(),o.vencimiento)<=15 && dentroDeRango(o.vencimiento, rango)).sort((a,b)=>a.vencimiento.localeCompare(b.vencimiento));
+    const rows = allObligacionesFlat().filter(o=> obligacionPendienteDePresentar(o) && daysBetween(today(),o.vencimiento)<=15 && dentroDeRango(o.vencimiento, rango) && esDelDespachoFiltrado(o.taxpayerId)).sort((a,b)=>a.vencimiento.localeCompare(b.vencimiento));
     body = reporteTablaObligacionesPivot(rows, true);
   } else if(tipo==='efirmas' || tipo==='csd'){
     const campo = tipo==='efirmas'?'efirma':'csd';
-    const rows = scopedTaxpayers().filter(t=> t[campo] && t[campo].vencimiento && daysBetween(today(), t[campo].vencimiento)<=30 && dentroDeRango(t[campo].vencimiento, rango));
+    const rows = scopedTaxpayers().filter(t=> t[campo] && t[campo].vencimiento && daysBetween(today(), t[campo].vencimiento)<=30 && dentroDeRango(t[campo].vencimiento, rango) && esDelDespachoFiltrado(t.id));
     body = `<table style="width:100%; border-collapse:collapse;"><thead><tr>${['Contribuyente','RFC','Vencimiento','Días restantes'].map(h=>`<th style="text-align:left; border-bottom:1px solid #999; padding:6px;">${h}</th>`).join('')}</tr></thead><tbody>
       ${rows.map(t=>`<tr><td style="padding:6px; border-bottom:1px solid #ddd;">${t.razonSocial}</td><td style="padding:6px; border-bottom:1px solid #ddd;">${t.rfc}</td><td style="padding:6px; border-bottom:1px solid #ddd;">${fmtDate(t[campo].vencimiento)}</td><td style="padding:6px; border-bottom:1px solid #ddd;">${daysBetween(today(),t[campo].vencimiento)}</td></tr>`).join('')}
     </tbody></table>`;
   }
-  imprimirReporte(titulos[tipo], body);
+  imprimirReporte(titulos[tipo], body, {subtitulo: subtituloDespacho, despachoIdReporte: despachoFiltro || null});
 }
 /* Notas de un contribuyente agrupadas por el periodo (mes y ejercicio) al que corresponden,
    en orden cronológico — no por la fecha en que se escribieron. */
@@ -4291,7 +4327,11 @@ function generarReporteContribuyente(id){
 }
 function imprimirReporte(titulo, bodyHtml, opciones){
   opciones = opciones || {};
-  const b = opciones.taxpayerId ? getDespachoDe(opciones.taxpayerId) : getDespachoPrincipal();
+  const b = opciones.taxpayerId
+    ? getDespachoDe(opciones.taxpayerId)
+    : opciones.despachoIdReporte
+      ? (getDespachos().find(d=>d.id===opciones.despachoIdReporte) || getDespachoPrincipal())
+      : getDespachoPrincipal();
   const area = document.getElementById('print-area');
   const logoDespachoHTML = b.logoDataUrl ? `<img src="${b.logoDataUrl}" alt="Logo del despacho">` : '';
   const logoClienteHTML = opciones.logoCliente ? `<img src="${opciones.logoCliente}" alt="Logo del contribuyente">` : '';
@@ -4391,6 +4431,7 @@ function bindViewEvents(){
   });
   bindAction(c, 'nueva-obligacion', (el)=>{ if(!canTaxpayer(el.dataset.id,'editar')){ toast('No tienes permiso sobre este contribuyente.'); return; } formObligacion(el.dataset.id); });
   bindAction(c, 'cargar-acuse-global', (el)=>{ if(!canTaxpayer(el.dataset.id,'editar')){ toast('No tienes permiso sobre este contribuyente.'); return; } formAcuseGlobal(el.dataset.id); });
+  bindAction(c, 'cargar-acuses-masivo', (el)=>{ if(!canTaxpayer(el.dataset.id,'editar')){ toast('No tienes permiso sobre este contribuyente.'); return; } formAcusesMasivo(el.dataset.id); });
   bindAction(c, 'cambiar-logo-cliente', (el)=>{ if(!canTaxpayer(el.dataset.id,'editar')){ toast('No tienes permiso sobre este contribuyente.'); return; } formLogoCliente(el.dataset.id); });
   bindAction(c, 'cambiar-despacho-cliente', (el)=>{ if(!canTaxpayer(el.dataset.id,'editar')){ toast('No tienes permiso sobre este contribuyente.'); return; } formDespachoCliente(el.dataset.id); });
   bindAction(c, 'editar-obligacion', (el)=>{ if(!canTaxpayer(el.dataset.id,'editar')){ toast('No tienes permiso sobre este contribuyente.'); return; } formObligacion(el.dataset.id, el.dataset.oid); });
@@ -4480,6 +4521,10 @@ function bindViewEvents(){
   });
   bindAction(c, 'filtro-anio-obl', (el)=>{
     filtroAnioObligaciones[el.dataset.id] = el.dataset.anio;
+    render();
+  });
+  bindAction(c, 'filtro-despacho-contrib', (el)=>{
+    STATE.contribDespachoFiltro = el.dataset.despacho || '';
     render();
   });
 
@@ -5091,6 +5136,117 @@ function formAcuseGlobal(tpId){
       };
     };
     reader.readAsDataURL(file);
+  });
+}
+/* Carga varios acuses de golpe (de cualquier periodo o ejercicio, no necesariamente el actual).
+   Reutiliza exactamente la misma lectura y el mismo emparejamiento que "Cargar acuse" (un archivo a
+   la vez), solo que procesa todos los PDFs seleccionados y junta el resultado en una sola revisión
+   antes de aplicar — para no tener que repetir el proceso uno por uno. */
+function formAcusesMasivo(tpId){
+  const t = getTaxpayer(tpId);
+  openModal(`
+    <div class="modal-head"><h2>Cargar varios acuses</h2><button class="modal-close" data-close>&times;</button></div>
+    <div class="modal-body">
+      <p class="field-hint" style="margin-bottom:10px;">Selecciona todos los PDFs que quieras a la vez — pueden ser de distintos meses o incluso de ejercicios anteriores, no tienen que ser consecutivos. El sistema los lee todos y arma una sola lista para revisar antes de aplicar nada.</p>
+      <div class="field"><input type="file" id="acusesMasivoArchivos" accept=".pdf" multiple></div>
+      <div id="acusesMasivoLeyendo" style="display:none;"><span class="muted" style="font-size:12.5px;">Leyendo los PDFs…</span></div>
+      <div id="acusesMasivoResultado" style="margin-top:12px; max-height:420px; overflow-y:auto;"></div>
+    </div>
+    <div class="modal-foot"><button class="btn" data-close>Cancelar</button><button class="btn btn-primary" id="confirmarAcusesMasivo" style="display:none;">Aplicar todo</button></div>
+  `, true);
+  bindModalClose();
+  let archivosLeidos = []; // {nombre, dataUrl, res, matches, encontrados, noEncontrados} por cada PDF
+
+  document.getElementById('acusesMasivoArchivos').addEventListener('change', async (ev)=>{
+    const files = Array.from(ev.target.files||[]);
+    if(!files.length) return;
+    document.getElementById('acusesMasivoLeyendo').style.display = 'block';
+    document.getElementById('acusesMasivoResultado').innerHTML = '';
+    document.getElementById('confirmarAcusesMasivo').style.display = 'none';
+    archivosLeidos = [];
+
+    for(const file of files){
+      if(file.type !== 'application/pdf'){ archivosLeidos.push({nombre:file.name, error:'No es un PDF.'}); continue; }
+      const dataUrl = await new Promise(resolve=>{
+        const reader = new FileReader();
+        reader.onload = ()=> resolve(reader.result);
+        reader.readAsDataURL(file);
+      });
+      const res = await extraerDatosAcuseGlobal(dataUrl);
+      if(res.error){ archivosLeidos.push({nombre:file.name, error: res.error==='no-lib'?'No se pudo cargar el lector de PDF.':'No se pudo leer este PDF.'}); continue; }
+      if(!res.periodo || !res.conceptos.length){ archivosLeidos.push({nombre:file.name, error:'No se identificó el periodo o los conceptos — puede ser un formato distinto.'}); continue; }
+      const matches = res.conceptos.map(c=>{
+        const obligacionExistente = c.tipoCatalogo ? (t.obligaciones||[]).find(o=> o.tipo===c.tipoCatalogo && o.periodo===res.periodo) : null;
+        return {concepto:c.nombreConcepto, tipoCatalogo:c.tipoCatalogo, monto:c.monto, obligacionId: obligacionExistente?obligacionExistente.id:null, obligacionTipo: obligacionExistente?obligacionExistente.tipo:null};
+      });
+      archivosLeidos.push({
+        nombre:file.name, dataUrl, res, matches,
+        encontrados: matches.filter(m=>m.obligacionId),
+        noEncontrados: matches.filter(m=>!m.obligacionId && m.tipoCatalogo),
+      });
+    }
+
+    document.getElementById('acusesMasivoLeyendo').style.display = 'none';
+    const resDiv = document.getElementById('acusesMasivoResultado');
+    let totalEncontrados = 0, totalNoEncontrados = 0;
+    resDiv.innerHTML = archivosLeidos.map((a,fi)=>{
+      if(a.error) return `<div class="notice" style="margin-bottom:10px;"><b>${escapeHtml(a.nombre)}</b>: ${escapeHtml(a.error)}</div>`;
+      totalEncontrados += a.encontrados.length;
+      totalNoEncontrados += a.noEncontrados.length;
+      return `
+      <div style="border:1px solid var(--borde); border-radius:var(--radio); padding:10px 12px; margin-bottom:10px;">
+        <p style="margin:0 0 6px; font-size:12.5px;"><b>${escapeHtml(a.nombre)}</b> — Periodo: <b>${escapeHtml(a.res.periodo)}</b> · ${escapeHtml(a.res.cabecera.tipoDeclaracion||'—')}</p>
+        <table style="width:100%;"><tbody>
+        ${a.matches.map((m,i)=>`<tr>
+          <td style="font-size:12px; padding:3px 0;">${escapeHtml(m.concepto)}</td>
+          <td style="font-size:12px; padding:3px 0;" class="mono">$${m.monto}</td>
+          <td style="font-size:12px; padding:3px 0;">${m.obligacionId
+            ? `✓ ${escapeHtml(m.obligacionTipo)}`
+            : m.tipoCatalogo
+              ? `<label class="check-item" style="font-size:12px;"><input type="checkbox" data-crear-idx="f${fi}-${i}" checked> Crear "${escapeHtml(m.tipoCatalogo)}"</label>`
+              : `<span class="muted">No identificado</span>`}</td>
+        </tr>`).join('')}
+        </tbody></table>
+      </div>`;
+    }).join('');
+    document.getElementById('confirmarAcusesMasivo').style.display = (totalEncontrados || totalNoEncontrados) ? 'inline-flex' : 'none';
+  });
+
+  document.getElementById('confirmarAcusesMasivo').addEventListener('click', ()=>{
+    let actualizadas = 0, creadas = 0, archivosAplicados = 0;
+    const aplicarDeclaracion = (ob, monto, archivo, res)=>{
+      if(!Array.isArray(ob.declaraciones)) ob.declaraciones = [];
+      const esComplementaria = (res.cabecera.tipoDeclaracion && res.cabecera.tipoDeclaracion.toLowerCase().includes('complement')) || ob.declaraciones.length>0;
+      ob.declaraciones.push({id:uid(), tipoDeclaracion: esComplementaria?'Complementaria':'Normal', fechaPresentacion:res.cabecera.fechaPresentacion||'', fechaPago:'', numOperacion:res.cabecera.numeroOperacion||'', montoPagar:monto, lineaCaptura:res.cabecera.lineaCaptura||'', acuse:archivo});
+      const ultima = ob.declaraciones[ob.declaraciones.length-1];
+      ob.fechaPresentacion = ultima.fechaPresentacion; ob.fechaPago = ultima.fechaPago; ob.numOperacion = ultima.numOperacion; ob.montoPagar = ultima.montoPagar; ob.lineaCaptura = ultima.lineaCaptura; ob.acuse = ultima.acuse;
+      if(ob.estatus !== 'Pagada' && ob.estatus !== 'Expediente completo') ob.estatus = 'Presentada';
+    };
+    archivosLeidos.forEach((a, fi)=>{
+      if(a.error) return;
+      const archivo = {nombre:a.nombre, mime:'application/pdf', dataUrl:a.dataUrl};
+      let huboAlgo = false;
+      a.encontrados.forEach(m=>{
+        const ob = t.obligaciones.find(o=>o.id===m.obligacionId);
+        if(!ob) return;
+        aplicarDeclaracion(ob, m.monto, archivo, a.res);
+        actualizadas++; huboAlgo = true;
+      });
+      a.matches.forEach((m,i)=>{
+        if(m.obligacionId || !m.tipoCatalogo) return;
+        const chk = document.querySelector(`[data-crear-idx="f${fi}-${i}"]`);
+        if(!chk || !chk.checked) return;
+        const nueva = {id:uid(), tipo:m.tipoCatalogo, periodicidad:'Mensual', periodo:a.res.periodo, vencimiento:calcularVencimientoObligacion(a.res.periodo, t.rfc), estatus:'Pendiente', responsable:'', revisor:'', declaraciones:[], fechaPresentacion:'', fechaPago:'', numOperacion:'', montoPagar:'', lineaCaptura:'', acuse:null, notas:'Creada automáticamente al cargar un acuse (carga masiva).'};
+        t.obligaciones = t.obligaciones||[];
+        t.obligaciones.push(nueva);
+        aplicarDeclaracion(nueva, m.monto, archivo, a.res);
+        creadas++; huboAlgo = true;
+      });
+      if(huboAlgo) archivosAplicados++;
+    });
+    logHistorial(t, `Carga masiva de acuses (${archivosAplicados} archivo(s)): ${actualizadas} obligación(es) actualizadas y ${creadas} creada(s)`);
+    saveTaxpayers(`Carga masiva de acuses para ${t.razonSocial}: ${actualizadas} actualizada(s), ${creadas} creada(s) de ${archivosAplicados} archivo(s) — por ${currentUser().nombre}`, t);
+    closeModal(); render(); toast(`${archivosAplicados} archivo(s) aplicado(s): ${actualizadas} obligación(es) actualizadas, ${creadas} creada(s).`);
   });
 }
 function formFiscal(tpId, campo){
