@@ -446,7 +446,12 @@ function responsableEspecificoDe(taxpayerId){
   const u = users.find(u => !userHasFullAccess(u) && Array.isArray(u.asignados) && u.asignados.includes(taxpayerId));
   return u ? u.nombre : null;
 }
-const OBLIGACIONES_CATALOGO = ['ISR','IVA','Retenciones ISR - Salarios','Retenciones ISR - Asimilados a salarios','Retenciones ISR - Servicios profesionales','Retenciones ISR - Arrendamiento','Retenciones ISR - Otras','Retenciones IVA','Retenciones (ISR/IVA)','Declaración mensual','Declaración anual','DIOT','Declaraciones informativas','Avisos al RFC','Contabilidad electrónica','IMSS / cuotas obrero-patronales','Impuestos estatales','Otra obligación'];
+// "Declaración mensual" se quitó del catálogo (11-oct-2026) por instrucción del despacho: es
+// repetitiva con ISR, IVA, Retenciones, etc. — declarar "ISR" y además "Declaración mensual" para el
+// mismo mes duplicaba el trabajo y las alarmas. Las obligaciones ya existentes con ese tipo no se
+// tocan (quedan como "Otra obligación" personalizada, editable igual que antes); solo deja de
+// ofrecerse para obligaciones nuevas.
+const OBLIGACIONES_CATALOGO = ['ISR','IVA','Retenciones ISR - Salarios','Retenciones ISR - Asimilados a salarios','Retenciones ISR - Servicios profesionales','Retenciones ISR - Arrendamiento','Retenciones ISR - Otras','Retenciones IVA','Retenciones (ISR/IVA)','Declaración anual','DIOT','Declaraciones informativas','Avisos al RFC','Contabilidad electrónica','IMSS / cuotas obrero-patronales','Impuestos estatales','Otra obligación'];
 const PERIODICIDADES = ['Mensual','Bimestral','Trimestral','Cuatrimestral','Semestral','Anual','Única vez','Sin periodo'];
 const MESES_LARGOS = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
 const ETAPAS_OBL = ['Pendiente','En proceso','Esperando información','Determinada','En revisión','Autorizada para presentar','Presentada','Pago pendiente','Pagada','Expediente completo'];
@@ -513,10 +518,27 @@ const DB = {
           localStorage.setItem(key, JSON.stringify(val));
           if(typeof toast==='function') toast('El almacenamiento del navegador estaba lleno — se liberó espacio borrando respaldos antiguos.');
           return;
-        }catch(e2){ /* sigue abajo al aviso general */ }
+        }catch(e2){ /* sigue abajo */ }
+      }
+      // Si lo que se intenta guardar es la lista de contribuyentes, borrar los respaldos puede no
+      // alcanzar — los PDFs de los acuses (que nunca viajan a la nube, solo viven en este navegador,
+      // ver docSinArchivos) son el otro gran consumidor de espacio y, a diferencia de los respaldos,
+      // crecen sin límite con cada acuse nuevo que se registra. Como último recurso automático, antes
+      // de darse por vencido, se liberan (quitándoles solo el PDF, conservando nombre e historial) los
+      // acuses de ejercicios ya antiguos y se reintenta guardar una vez más.
+      if(sinEspacio && key === KEYS.taxpayers && typeof liberarEspacioAcuses==='function'){
+        try{
+          const anioLimite = new Date().getFullYear() - 1;
+          const n = liberarEspacioAcuses(val, anioLimite);
+          if(n > 0){
+            localStorage.setItem(key, JSON.stringify(val));
+            if(typeof toast==='function') toast(`El almacenamiento del navegador estaba lleno — se liberaron ${n} acuse(s) de ejercicios anteriores a ${anioLimite} en este dispositivo (se conserva el nombre de cada archivo; puedes volver a adjuntarlo si lo necesitas). Te recomendamos exportar un respaldo desde "Respaldos".`);
+            return;
+          }
+        }catch(e3){ /* sigue abajo al aviso general */ }
       }
       console.warn('No se pudo guardar en el almacenamiento local ('+key+'):', e.message);
-      if(typeof toast==='function') toast('No se pudo guardar localmente: el navegador se quedó sin espacio. Exporta tu información desde "Respaldos" y libera espacio cuando puedas.');
+      if(typeof toast==='function') toast('No se pudo guardar localmente: el navegador se quedó sin espacio. Exporta tu información desde "Respaldos" y usa ahí el botón "Liberar espacio de acuses antiguos".');
     }
   },
 };
@@ -693,12 +715,14 @@ function viewConfiguracion(){
   const lista = getDespachos();
   const editable = can('configuracion','editar');
   const sospechosas = editable ? obligacionesSospechosasVencimiento() : [];
+  const duplicadas = editable ? obligacionesDuplicadas() : [];
   return `
   <div class="view-head">
     <div><h1>Configuración del sistema</h1><p>Despachos registrados en este sistema — cada contribuyente se asigna a uno de ellos.</p></div>
     ${editable?`<button class="btn btn-primary" data-action="nuevo-despacho">+ Agregar despacho</button>`:''}
   </div>
   ${sospechosas.length? `<div class="notice" style="margin-bottom:14px;">⚠️ Se encontraron <b>${sospechosas.length}</b> obligación(es) mensual(es) con vencimiento probablemente mal calculado (del error ya corregido de "hoy + 17 días"). <button class="btn btn-sm" data-action="revisar-vencimientos" style="margin-left:6px;">Revisar y corregir</button></div>` : ''}
+  ${duplicadas.length? `<div class="notice" style="margin-bottom:14px;">⚠️ Se encontraron <b>${duplicadas.length}</b> obligación(es) duplicada(s) (mismo tipo y vencimiento, una Pendiente vacía y otra ya presentada). <button class="btn btn-sm" data-action="revisar-duplicados" style="margin-left:6px;">Revisar y corregir</button></div>` : ''}
   ${!lista.length ? `
   <div class="panel">
     <p class="muted">Todavía no has registrado ningún despacho.</p>
@@ -1074,6 +1098,26 @@ function calcularVencimientoObligacion(periodoYYYYMM, rfc){
   const conExtra = addDays(dia17, diasExtraPorRFC(rfc));
   return siguienteDiaHabil(conExtra);
 }
+/* Empareja un concepto leído de un acuse (tipo + periodo) con la obligación ya registrada a la que
+   corresponde. Primero intenta por coincidencia exacta de periodo (el camino normal). Si no la
+   encuentra, se vuelve a intentar comparando contra el vencimiento que le tocaría a ese periodo
+   según la fórmula oficial — esto cubre obligaciones antiguas cuyo campo "periodo" quedó vacío o se
+   infirió mal por una migración anterior (por ejemplo, la primera obligación de un contribuyente
+   nuevo, que se crea sin periodo capturado). Sin este segundo intento, el sistema no encontraba la
+   obligación "Pendiente" ya existente y creaba una nueva con el mismo tipo y el mismo vencimiento —
+   dejando dos obligaciones duplicadas (una Pendiente sin tocar y otra Presentada). Si encuentra la
+   coincidencia por esta segunda vía, de paso corrige el periodo guardado para que no se repita el
+   problema la próxima vez que se cargue un acuse de ese contribuyente. */
+function encontrarObligacionParaAcuse(t, tipoCatalogo, periodo){
+  if(!tipoCatalogo || !periodo) return null;
+  const obligaciones = t.obligaciones || [];
+  let ob = obligaciones.find(o=> o.tipo===tipoCatalogo && o.periodo===periodo);
+  if(ob) return ob;
+  const vencimientoEsperado = calcularVencimientoObligacion(periodo, t.rfc);
+  ob = obligaciones.find(o=> o.tipo===tipoCatalogo && o.periodo!==periodo && o.vencimiento===vencimientoEsperado);
+  if(ob) ob.periodo = periodo; // autocorrige el periodo mal inferido, para que no se repita el problema
+  return ob || null;
+}
 /* Detecta obligaciones mensuales que quedaron con un vencimiento equivocado por el error de "hoy
    + 17 días" que tenía el alta de contribuyentes (ya corregido). La señal confiable es: periodicidad
    Mensual, sin el campo "periodo" guardado (todos los demás caminos del sistema sí lo guardan), y
@@ -1170,6 +1214,92 @@ function formRevisarVencimientosSospechosos(){
     if(corregidas){
       saveTaxpayers(`Corrección masiva de vencimientos (${corregidas} obligación[es]) — por ${currentUser().nombre}`);
       toast(`${corregidas} obligación(es) corregida(s).`);
+    } else {
+      toast('No seleccionaste ninguna fila.');
+    }
+    closeModal(); render();
+  });
+}
+/* Detecta obligaciones duplicadas: mismo contribuyente, mismo tipo y mismo vencimiento, donde una
+   quedó "Pendiente" (sin ninguna declaración capturada) y otra ya tiene una declaración registrada
+   (Presentada o una etapa posterior). Este patrón apareció por el emparejamiento de acuses que no
+   encontraba la obligación ya existente (campo "periodo" vacío o mal inferido) y creaba una nueva en
+   vez de actualizarla — ver encontrarObligacionParaAcuse, ya corregido para que no vuelva a pasar.
+   Nunca se tocan dos obligaciones que AMBAS tengan declaraciones propias (eso sí sería información
+   real de dos periodos distintos, no un duplicado). */
+function obligacionesDuplicadas(){
+  const grupos = [];
+  taxpayers.forEach(t=>{
+    const porClave = new Map();
+    (t.obligaciones||[]).forEach(o=>{
+      if(!o.vencimiento) return;
+      const clave = o.tipo+'|'+o.vencimiento;
+      if(!porClave.has(clave)) porClave.set(clave, []);
+      porClave.get(clave).push(o);
+    });
+    porClave.forEach(obls=>{
+      if(obls.length<2) return;
+      const tieneAvance = (o)=> (Array.isArray(o.declaraciones) && o.declaraciones.length>0) || (o.estatus && o.estatus!=='Pendiente');
+      const conAvance = obls.filter(tieneAvance);
+      const sinAvance = obls.filter(o=> !tieneAvance(o));
+      if(conAvance.length===1 && sinAvance.length>=1){
+        grupos.push({
+          taxpayerId:t.id, contribuyente:t.razonSocial, rfc:t.rfc, tipo:obls[0].tipo, vencimiento:obls[0].vencimiento,
+          conservarId:conAvance[0].id, eliminarIds:sinAvance.map(o=>o.id),
+        });
+      }
+    });
+  });
+  return grupos;
+}
+function formRevisarDuplicados(){
+  const grupos = obligacionesDuplicadas();
+  if(!grupos.length){ toast('No se encontró ninguna obligación duplicada. Todo en orden.'); return; }
+  openModal(`
+    <div class="modal-head"><h2>Obligaciones duplicadas (${grupos.length})</h2><button class="modal-close" data-close>&times;</button></div>
+    <div class="modal-body">
+      <div class="notice info">En cada fila hay dos (o más) obligaciones del mismo tipo con el mismo vencimiento: una quedó "Pendiente" sin ninguna declaración y otra ya tiene la presentación registrada. Al aplicar, se elimina la(s) copia(s) "Pendiente" vacía(s) y se conserva la que ya tiene la información real — no se pierde ningún dato.</div>
+      <div class="table-wrap" style="margin-top:10px; max-height:420px; overflow-y:auto;">
+        <table>
+          <thead><tr><th><input type="checkbox" id="chkTodosDup" checked></th><th>Contribuyente</th><th>Obligación</th><th>Vencimiento</th><th>Se eliminarán</th></tr></thead>
+          <tbody>
+            ${grupos.map((g,i)=>`<tr data-fila="${i}">
+              <td><input type="checkbox" class="chkFilaDup" checked></td>
+              <td>${escapeHtml(g.contribuyente)}</td>
+              <td>${escapeHtml(g.tipo)}</td>
+              <td class="mono">${fmtDate(g.vencimiento)}</td>
+              <td>${g.eliminarIds.length} duplicado(s) "Pendiente"</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="modal-foot"><button class="btn" data-close>Cancelar</button><button class="btn btn-primary" id="aplicarCorreccionDup">Eliminar duplicados seleccionados</button></div>
+  `, true);
+  bindModalClose();
+  document.getElementById('chkTodosDup').addEventListener('change', (e)=>{
+    document.querySelectorAll('.chkFilaDup').forEach(c=> c.checked = e.target.checked);
+  });
+  document.getElementById('aplicarCorreccionDup').addEventListener('click', ()=>{
+    let eliminadas = 0;
+    const taxpayersTocados = new Set();
+    document.querySelectorAll('tr[data-fila]').forEach(tr=>{
+      if(!tr.querySelector('.chkFilaDup').checked) return;
+      const g = grupos[Number(tr.dataset.fila)];
+      const t = getTaxpayer(g.taxpayerId);
+      if(!t || !Array.isArray(t.obligaciones)) return;
+      const antes = t.obligaciones.length;
+      t.obligaciones = t.obligaciones.filter(o=> !g.eliminarIds.includes(o.id));
+      const quitadas = antes - t.obligaciones.length;
+      if(quitadas>0){
+        logHistorial(t, `Se eliminó obligación duplicada "${g.tipo}" (vence ${fmtDate(g.vencimiento)}) — se conservó la que ya tenía la presentación registrada.`);
+        eliminadas += quitadas;
+        taxpayersTocados.add(t.id);
+      }
+    });
+    if(eliminadas){
+      saveTaxpayers(`Corrección masiva de obligaciones duplicadas (${eliminadas} eliminada[s] en ${taxpayersTocados.size} contribuyente[s]) — por ${currentUser().nombre}`);
+      toast(`${eliminadas} obligación(es) duplicada(s) eliminada(s).`);
     } else {
       toast('No seleccionaste ninguna fila.');
     }
@@ -1738,7 +1868,10 @@ function extraerObligacionesCatalogo(texto){
   if(/declaracion(es)? informativa/.test(t)) agregar('Declaraciones informativas');
   if(/aviso.*rfc|rfc.*aviso/.test(t)) agregar('Avisos al RFC');
   if(/declaracion anual/.test(t)) agregar('Declaración anual');
-  if(/declaracion mensual|pago\s+\w*\s*mensual/.test(t)) agregar('Declaración mensual');
+  // "Declaración mensual" se eliminó del catálogo (11-oct-2026): era repetitiva con ISR, IVA,
+  // Retenciones, etc. — un mismo concepto no debe generar dos obligaciones. Ya no se detecta aquí
+  // a propósito, para que el acuse se empareje con el ISR/IVA/Retención real en vez de crear este
+  // tipo genérico.
   return detectadas;
 }
 function parsearConstanciaSAT(texto){
@@ -2663,6 +2796,14 @@ function tarjetasObligacionesPorCliente(rows, expandedSet, toggleAction, vacioTe
   return lista.map(g=>{
     const expandido = expandedSet.has(g.taxpayerId);
     const peor = g.items.reduce((p,o)=>{ const s = obligacionSemaforo(o); return (rangoSemaforo[s.tag]||0) > (rangoSemaforo[p.tag]||0) ? s : p; }, {tag:'ok', label:''});
+    // El número de la pastilla debe reflejar solo las que realmente siguen pendientes de presentar
+    // o vencidas — no el total de filas del grupo, que puede incluir obligaciones de ese mismo año
+    // que ya se presentaron (se muestran igual en el detalle, para tener el historial completo, pero
+    // no deben inflar la cuenta de "pendientes" que se ve de un vistazo).
+    const pendientesCount = g.items.filter(obligacionPendienteDePresentar).length;
+    const label = pendientesCount>0
+      ? pendientesCount+' pendiente'+(pendientesCount>1?'s':'')
+      : g.items.length+' obligación'+(g.items.length>1?'es':'');
     return `
     <div class="panel" style="margin-bottom:8px; padding:0; overflow:hidden;">
       <div style="display:flex; align-items:center; gap:12px; padding:12px 16px; cursor:pointer;" data-action="${toggleAction}" data-id="${g.taxpayerId}">
@@ -2671,7 +2812,7 @@ function tarjetasObligacionesPorCliente(rows, expandedSet, toggleAction, vacioTe
           <b>${escapeHtml(g.contribuyente)}</b>
           <span class="muted mono" style="font-size:11px; margin-left:8px;">${g.rfc}</span>
         </div>
-        ${pill({tag:peor.tag, label: g.items.length+' obligación'+(g.items.length>1?'es':'')})}
+        ${pill({tag:peor.tag, label})}
       </div>
       ${expandido? `<div style="padding:0 16px 12px 16px; border-top:1px solid var(--borde);">
         <table style="width:100%; margin-top:8px;"><tbody>
@@ -3113,7 +3254,7 @@ function tabObligaciones(t){
           <td style="font-size:12px;">${o.responsable?`Prep: ${escapeHtml(o.responsable)}`:'<span class="muted">Sin responsable</span>'}${o.revisor?`<br>Rev: ${escapeHtml(o.revisor)}`:''}</td>
           <td>${o.fechaPresentacion?fmtDate(o.fechaPresentacion):'—'}${o.fechaPago?`<br><span class="muted" style="font-size:11px;">Pago: ${fmtDate(o.fechaPago)}</span>`:''}</td>
           <td class="mono">${o.numOperacion||'—'}</td>
-          <td>${o.acuse?(o.acuse.dataUrl?`<a class="link-btn" href="${o.acuse.dataUrl}" download="${escapeHtml(o.acuse.nombre)}">📎 Ver</a>`:`<span class="muted" title="Se subió desde otra computadora">📎 (otro equipo)</span>`):'<span class="muted">—</span>'}</td>
+          <td>${o.acuse?(o.acuse.dataUrl?`<a class="link-btn" href="${o.acuse.dataUrl}" download="${escapeHtml(o.acuse.nombre)}">📎 Ver</a>`:o.acuse.archivoLiberado?`<span class="muted" title="Se liberó automáticamente por espacio de almacenamiento">📎 (liberado)</span>`:`<span class="muted" title="Se subió desde otra computadora">📎 (otro equipo)</span>`):'<span class="muted">—</span>'}</td>
           <td>${canTaxpayer(t.id,'editar')?`
             <button class="link-btn" data-action="editar-obligacion" data-id="${t.id}" data-oid="${o.id}">Editar</button>
             <button class="link-btn" style="color:var(--peligro); margin-left:8px;" data-action="borrar-obligacion" data-id="${t.id}" data-oid="${o.id}">Eliminar</button>`:''}</td>
@@ -3516,6 +3657,41 @@ function docSinArchivos(t){
     return oLigera;
   });
   return {...resto, obligaciones: obligacionesLigeras};
+}
+/* A diferencia de "Documentos" (que solo viven en este dispositivo pero con un límite razonable de
+   uso), los acuses NUNCA viajan completos a la nube (ver docSinArchivos arriba) — así que, con el
+   tiempo, muchos contribuyentes y varios ejercicios fiscales, los PDFs acumulados en este mismo
+   navegador pueden llenar el espacio que localStorage permite (unos 5-10 MB), y el guardado falla
+   justo al registrar un acuse nuevo (QuotaExceededError). Esta función libera espacio quitando el
+   PDF (el dataUrl pesado) de los acuses de periodos ya antiguos — se conserva todo lo demás intacto
+   (nombre del archivo, fechas, montos, línea de captura, historial): solo el archivo en sí se quita,
+   y se puede volver a adjuntar manualmente si hiciera falta. Nunca toca el acuse más reciente de cada
+   obligación ni nada del ejercicio en curso o el inmediato anterior. Devuelve cuántos acuses liberó.
+   Recibe la lista de contribuyentes a modificar (la muta directamente) para poder usarse tanto desde
+   DB.set (con la misma referencia que se intenta guardar) como desde el botón manual en Respaldos. */
+function anioDeObligacion(o){
+  if(o.periodo) return o.periodo.slice(0,4);
+  if(o.vencimiento) return o.vencimiento.slice(0,4);
+  return '';
+}
+function liberarEspacioAcuses(lista, anioLimite){
+  let liberados = 0;
+  (lista||[]).forEach(t=>{
+    (t.obligaciones||[]).forEach(o=>{
+      const anio = anioDeObligacion(o);
+      if(!anio || Number(anio) >= Number(anioLimite)) return; // se conserva el ejercicio en curso y el anterior
+      // También se quita de la caché en memoria "localAcusesById" — si no, la próxima sincronización
+      // con la nube volvería a restaurar este mismo PDF pesado desde ahí (ver restaurarAcusesLocales)
+      // y anularía el espacio que se acaba de liberar.
+      if(o.acuse && o.acuse.dataUrl){ o.acuse = {nombre:o.acuse.nombre, mime:o.acuse.mime, archivoLiberado:true}; liberados++; if(typeof localAcusesById!=='undefined') localAcusesById.delete('obl:'+o.id); }
+      if(Array.isArray(o.declaraciones)){
+        o.declaraciones.forEach(d=>{
+          if(d.acuse && d.acuse.dataUrl){ d.acuse = {nombre:d.acuse.nombre, mime:d.acuse.mime, archivoLiberado:true}; liberados++; if(typeof localAcusesById!=='undefined' && d.id) localAcusesById.delete(d.id); }
+        });
+      }
+    });
+  });
+  return liberados;
 }
 /* Antes de reemplazar los datos locales con lo que llega de la nube, se guarda el PDF completo de
    cada acuse que ya se tuviera (por id de declaración, y por id de obligación para el campo
@@ -4128,6 +4304,10 @@ function viewRespaldos(){
         <input type="checkbox" id="autoBackupToggle" ${cfg.autoBackup?'checked':''}> Respaldo automático diario (al abrir la herramienta)
       </label>
       <div class="divider"></div>
+      <h2>Espacio de almacenamiento de este navegador</h2>
+      <p class="field-hint" style="margin-bottom:10px;">Los PDFs de los acuses de presentación se guardan completos solo en el dispositivo donde se subieron (nunca viajan a la nube, por su tamaño). Con los años, pueden llenar el espacio que el navegador permite y provocar el aviso de "no se pudo guardar localmente". Este botón libera ese espacio quitando el PDF de los acuses de ejercicios anteriores al pasado — conserva el nombre del archivo y todo lo demás (fechas, montos, línea de captura); solo el PDF en sí se quita, y puedes volver a adjuntarlo si lo necesitas.</p>
+      <button class="btn" data-action="liberar-espacio-acuses">🗜️ Liberar espacio de acuses antiguos</button>
+      <div class="divider"></div>
       <h2>Historial de respaldos</h2>
       ${backups.length? `<div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Tipo</th><th>Contribuyentes</th><th></th></tr></thead><tbody>
         ${backups.map(b=>`<tr><td>${new Date(b.fecha).toLocaleString('es-MX')}</td><td>${b.tipo}</td><td>${b.data.taxpayers.length}</td>
@@ -4478,6 +4658,13 @@ function bindViewEvents(){
     DB.set(KEYS.audit, []); touchAudit(`Bitácora de modificaciones limpiada — por ${currentUser().nombre}`); render(); toast('Bitácora limpiada.');
   }));
   bindAction(c, 'backup-manual', ()=>{ doBackup('manual'); toast('Respaldo manual creado.'); render(); });
+  bindAction(c, 'liberar-espacio-acuses', ()=>{
+    const anioLimite = new Date().getFullYear() - 1;
+    if(!confirm(`Esto quitará el PDF (no el resto de los datos) de los acuses con periodo anterior a ${anioLimite}, solo en este navegador. Puedes volver a adjuntarlos manualmente si los necesitas. ¿Continuar?`)) return;
+    const n = liberarEspacioAcuses(taxpayers, anioLimite);
+    if(n>0){ saveTaxpayers(`Se liberó espacio de almacenamiento: ${n} acuse(s) de ejercicios anteriores a ${anioLimite} — por ${currentUser().nombre}`); toast(`${n} acuse(s) liberado(s) — se recuperó espacio en este navegador.`); render(); }
+    else toast('No se encontraron acuses de ejercicios anteriores que liberar.');
+  });
   bindAction(c, 'crear-compartido', ()=> crearArchivoCompartido());
   bindAction(c, 'vincular-compartido', ()=> vincularArchivoExistente());
   bindAction(c, 'sincronizar-compartido', ()=> sincronizarCompartido(true));
@@ -4566,6 +4753,7 @@ function bindViewEvents(){
   bindAction(c, 'nueva-plantilla', ()=>{ if(!can('plantillas','editar')){ toast('No tienes permiso.'); return; } formPlantilla(null); });
   bindAction(c, 'nuevo-despacho', ()=>{ if(!can('configuracion','editar')){ toast('No tienes permiso.'); return; } formDespacho(null); });
   bindAction(c, 'revisar-vencimientos', ()=>{ if(!can('configuracion','editar')){ toast('No tienes permiso.'); return; } formRevisarVencimientosSospechosos(); });
+  bindAction(c, 'revisar-duplicados', ()=>{ if(!can('configuracion','editar')){ toast('No tienes permiso.'); return; } formRevisarDuplicados(); });
   bindAction(c, 'editar-despacho', (el)=>{ if(!can('configuracion','editar')){ toast('No tienes permiso.'); return; } formDespacho(el.dataset.id); });
   bindAction(c, 'eliminar-despacho', (el)=>{
     if(!can('configuracion','editar')){ toast('No tienes permiso.'); return; }
@@ -4950,7 +5138,7 @@ function formObligacion(tpId, oId){
       <div class="field"><label>Línea de captura</label><input class="mono" data-decl-campo="lineaCaptura" value="${escapeAttr(d.lineaCaptura||'')}"></div>
       <div class="field">
         <label>Acuse de presentación (PDF)</label>
-        ${d.acuse?`<div class="notice info" style="margin-bottom:6px; display:flex; align-items:center; justify-content:space-between; gap:8px;"><span>${escapeHtml(d.acuse.nombre)}</span>${d.acuse.dataUrl?`<a class="link-btn" href="${d.acuse.dataUrl}" download="${escapeHtml(d.acuse.nombre)}">Descargar</a>`:`<span class="muted" style="font-size:11.5px;">No disponible en este dispositivo — se subió desde otra computadora</span>`}</div>`:''}
+        ${d.acuse?`<div class="notice info" style="margin-bottom:6px; display:flex; align-items:center; justify-content:space-between; gap:8px;"><span>${escapeHtml(d.acuse.nombre)}</span>${d.acuse.dataUrl?`<a class="link-btn" href="${d.acuse.dataUrl}" download="${escapeHtml(d.acuse.nombre)}">Descargar</a>`:d.acuse.archivoLiberado?`<span class="muted" style="font-size:11.5px;">Archivo liberado automáticamente por espacio — vuelve a adjuntarlo si lo necesitas</span>`:`<span class="muted" style="font-size:11.5px;">No disponible en este dispositivo — se subió desde otra computadora</span>`}</div>`:''}
         <input type="file" accept=".pdf" data-decl-acuse="${i}">
       </div>
       <div data-decl-leyendo="${i}" style="display:none; margin-top:6px;"><span class="muted" style="font-size:12px;">Leyendo el PDF…</span></div>
@@ -5072,7 +5260,7 @@ function formAcuseGlobal(tpId){
         return;
       }
       const matches = res.conceptos.map(c=>{
-        const obligacionExistente = c.tipoCatalogo ? (t.obligaciones||[]).find(o=> o.tipo===c.tipoCatalogo && o.periodo===res.periodo) : null;
+        const obligacionExistente = encontrarObligacionParaAcuse(t, c.tipoCatalogo, res.periodo);
         return {concepto:c.nombreConcepto, tipoCatalogo:c.tipoCatalogo, monto:c.monto, obligacionId: obligacionExistente?obligacionExistente.id:null, obligacionTipo: obligacionExistente?obligacionExistente.tipo:null};
       });
       const encontrados = matches.filter(m=>m.obligacionId);
@@ -5176,7 +5364,7 @@ function formAcusesMasivo(tpId){
       if(res.error){ archivosLeidos.push({nombre:file.name, error: res.error==='no-lib'?'No se pudo cargar el lector de PDF.':'No se pudo leer este PDF.'}); continue; }
       if(!res.periodo || !res.conceptos.length){ archivosLeidos.push({nombre:file.name, error:'No se identificó el periodo o los conceptos — puede ser un formato distinto.'}); continue; }
       const matches = res.conceptos.map(c=>{
-        const obligacionExistente = c.tipoCatalogo ? (t.obligaciones||[]).find(o=> o.tipo===c.tipoCatalogo && o.periodo===res.periodo) : null;
+        const obligacionExistente = encontrarObligacionParaAcuse(t, c.tipoCatalogo, res.periodo);
         return {concepto:c.nombreConcepto, tipoCatalogo:c.tipoCatalogo, monto:c.monto, obligacionId: obligacionExistente?obligacionExistente.id:null, obligacionTipo: obligacionExistente?obligacionExistente.tipo:null};
       });
       archivosLeidos.push({
